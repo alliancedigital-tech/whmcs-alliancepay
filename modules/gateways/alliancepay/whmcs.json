@@ -1,0 +1,27 @@
+{
+    "schema": "1.0.0",
+    "type": "whmcs-gateways",
+    "name": "alliancepay",
+    "license": "MIT",
+    "category": "payments",
+    "logo": {
+        "filename": "logo.png"
+    },
+    "description": {
+        "name": "AlliancePay Payment Gateway",
+        "tagline": "Офіційний платіжний шлюз для Bank Alliance (Україна). Підтримує оплату через HPP (Hosted Payment Page)."
+    },
+    "authors": [
+        {
+            "name": "Alliance Dgtl"
+        }
+    ],
+    "tags": [
+        "payments",
+        "gateway",
+        "ukraine",
+        "alliance bank",
+        "apple pay",
+        "google pay"
+    ]
+}

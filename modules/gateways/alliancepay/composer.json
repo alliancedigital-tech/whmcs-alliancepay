@@ -1,0 +1,30 @@
+{
+    "name": "alliance/whmcs-alliancepay",
+    "description": "Модуль платіжного шлюзу AlliancePay для WHMCS на базі офіційного SDK",
+    "type": "project",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Alliance Dgtl.",
+            "homepage": "https://alliancedgtl.com/"
+        }
+    ],
+    "require": {
+        "php": ">=8.0",
+        "ext-sodium": "*",
+        "ext-hash": "*",
+        "ext-gmp": "*",
+        "ext-openssl": "*",
+        "alliance/alliancepay-payment-sdk": "*"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/alliancedigital-tech/alliancepay-php-sdk.git"
+        }
+    ]
+}

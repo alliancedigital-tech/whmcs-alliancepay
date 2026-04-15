@@ -1,0 +1,57 @@
+name: Create WHMCS Release Archive
+
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.0'
+          extensions: mbstring, xml, json
+          tools: composer
+
+      - name: Install dependencies
+        run: |
+          cd modules/gateways/alliancepay
+          composer install --no-dev --optimize-autoloader
+
+      - name: Prepare Distribution
+        run: |
+          mkdir dist
+          cp -r modules dist/
+          # Видаляємо непотрібні файли з дистрибутиву, якщо вони є в папках модулів
+          find dist -name ".git*" -exec rm -rf {} +
+          find dist -name "composer.json" -delete
+          find dist -name "composer.lock" -delete
+
+      - name: Create ZIP
+        run: |
+          cd dist
+          zip -r ../alliancepay-whmcs-gateway-${{ github.ref_name }}.zip .
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: alliancepay-whmcs-gateway-${{ github.ref_name }}.zip
+          name: Release ${{ github.ref_name }}
+          body: |
+            - Автоматична збірка версії: ${{ github.ref_name }}
+            - Включено всі залежності (vendor)
+            
+            **Інструкція з встановлення:**
+            Розпакуйте вміст архіву в кореневу директорію вашого WHMCS.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
