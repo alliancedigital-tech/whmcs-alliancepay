@@ -15,7 +15,8 @@
         "ext-hash": "*",
         "ext-gmp": "*",
         "ext-openssl": "*",
-        "alliance/alliancepay-payment-sdk": "*"
+        "alliance/alliancepay-payment-sdk": "*",
+        "league/iso3166": "4.3.3"
     },
     "config": {
         "optimize-autoloader": true,

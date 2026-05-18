@@ -13,6 +13,7 @@ require_once __DIR__ . '/alliancepay/AlliancePayHelper.php';
 use AlliancePay\Sdk\Payment\Dto\Order\OrderRequestDTO;
 use AlliancePay\Sdk\Payment\Order\CreateOrder;
 use \WHMCS\Database\Capsule;
+use League\ISO3166\ISO3166;
 use AlliancePay\Sdk\Services\RequestIdentification\GenerateRequestIdentification;
 use AlliancePay\Sdk\Payment\Refund\RefundOrder;
 use AlliancePay\Sdk\Payment\Dto\Refund\RefundRequestDTO;
@@ -132,8 +133,22 @@ function alliancepay_link($params)
                 $coinAmount = (int)round($amount * 100);
 
                 $callbackUrl = $params['systemurl']
-                    . 'modules/gateways/callback/alliancepay.php?invoiceid='
+                    . '/modules/gateways/callback/alliancepay.php?invoiceid='
                     . $params['invoiceid'];
+
+                $phone = '';
+                $phoneCc = $params['clientdetails']['phonecc'];
+                $phoneNumber = $params['clientdetails']['phonenumber'];
+                if ($phoneCc && $phoneNumber) {
+                    $phone = $phoneCc . $phoneNumber;
+                }
+
+                $countryCode = '';
+                if (!empty($params['clientdetails']['countrycode'])) {
+                    $leagueIso3166 = new ISO3166();
+                    $countryData = $leagueIso3166->alpha2($params['clientdetails']['countrycode']);
+                    $countryCode = $countryData['numeric'] ?? '';
+                }
 
                 $orderData = [
                     'merchantRequestId' => $merchantRequestId,
@@ -147,10 +162,22 @@ function alliancepay_link($params)
                     'notificationUrl' => $callbackUrl,
                     'purpose' => 'Invoice #' . $params['invoiceid'],
                     'customerData' => [
-                        'senderCustomerId' => (string)$params['clientdetails']['userid'],
-                        'senderEmail' => $params['clientdetails']['email'],
+                        'senderCustomerId' => (string)$params['clientdetails']['userid'] ?? '',
+                        'senderFirstName' => $params['clientdetails']['firstname'] ?? '',
+                        'senderLastName' => $params['clientdetails']['lastname'] ?? '',
+                        'senderEmail' => $params['clientdetails']['email'] ?? '',
+                        'senderRegion' => $params['clientdetails']['state'] ?? '',
+                        'senderCity' => $params['clientdetails']['city'] ?? '',
+                        'senderStreet' => $params['clientdetails']['address1'] ?? '',
+                        'senderAdditionalAddress' => $params['clientdetails']['address2'] ?? '',
+                        'senderZipCode' => $params['clientdetails']['postcode'] ?? '',
+                        'senderPhone' => $phone,
                     ],
                 ];
+
+                if (!empty($countryCode)) {
+                    $orderData['customerData']['senderCountry'] = $countryCode;
+                }
 
                 $orderRequest = OrderRequestDTO::fromArray($orderData);
                 $orderService = new CreateOrder();
