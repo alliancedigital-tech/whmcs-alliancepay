@@ -11,11 +11,11 @@ require_once __DIR__ . '/../../../includes/invoicefunctions.php';
 require_once __DIR__ . '/../alliancepay/vendor/autoload.php';
 require_once __DIR__ . '/../alliancepay/AlliancePayHelper.php';
 
-use alliancepay\AlliancePayHelper;
+use AlliancePay\AlliancePayHelper;
 use AlliancePay\Sdk\Payment\Callback\CallbackHandler;
 use WHMCS\Database\Capsule;
 
-$gatewayModuleName = 'alliancepay';
+$gatewayModuleName = AlliancePayHelper::GATEWAY_MODULE_NAME;
 $gatewayParams = getGatewayVariables($gatewayModuleName);
 if (!$gatewayParams['type']) {
     die("Module Not Activated");
@@ -45,43 +45,53 @@ try {
 
     $callbackData = $callback->toArray();
     $orderStatus = $callbackData['orderStatus'];
-    $operationStatus = $callbackData['operation']->getStatus();
+    $operationArray = $callbackData['operation'];
+    $operationStatus = $operationArray['status'] ?? '';
     $hppOrderId = $callbackData['hppOrderId'];
     $merchantRequestId = $callbackData['merchantRequestId'];
-    $operationId = $callbackData['operation']->getOperationId();
+    $operationId = $operationArray['operationId'] ?? '';
     $amountPaid = (float)($callbackData['coinAmount'] / 100);
 
-    if ($orderStatus === 'SUCCESS' && $operationStatus === 'SUCCESS') {
+    if ($orderStatus === AlliancePayHelper::STATUS_SUCCESS && $operationStatus === AlliancePayHelper::STATUS_SUCCESS) {
 
-        $invoiceId = checkCbInvoiceID($invoiceId, $gatewayParams['name']);
+        $operationType = $operationArray['type'] ?? '';
 
-        checkCbTransID($operationId);
-        addInvoicePayment($invoiceId, $operationId, $amountPaid, 0, $gatewayModuleName);
+        if ($operationType === AlliancePayHelper::OPERATION_TYPE_REFUND) {
+            logTransaction(
+                $gatewayParams['name'],
+                $payload,
+                "Refund Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
+            );
+        } else {
+            $invoiceId = checkCbInvoiceID($invoiceId, $gatewayParams['name']);
 
-        $transaction = Capsule::table('tblaccounts')
-            ->where('transid', $operationId)
-            ->where('invoiceid', $invoiceId)
-            ->orderBy('id', 'desc')
-            ->first();
+            checkCbTransID($operationId);
+            addInvoicePayment($invoiceId, $operationId, $amountPaid, 0, $gatewayModuleName);
 
-        if ($transaction) {
-            $checkLink = "<a href=\"../modules/gateways/alliancepay/admin_status.php?hppOrderId="
-                . $hppOrderId
-                . "\" target=\"_blank\" style=\"color:blue; text-decoration:underline;\">Check Order</a>";
+            $transaction = Capsule::table('tblaccounts')
+                ->where('transid', $operationId)
+                ->where('invoiceid', $invoiceId)
+                ->orderBy('id', 'desc')
+                ->first();
 
-            $newDescription = $transaction->description . " | HPP Order ID: {$hppOrderId} | " . $checkLink;
+            if ($transaction) {
+                $checkLink = "<a href=\"../modules/gateways/alliancepay/admin_status.php?hppOrderId="
+                    . $hppOrderId
+                    . "\" target=\"_blank\" style=\"color:blue; text-decoration:underline;\">Check Order</a>";
 
-            Capsule::table('tblaccounts')
-                ->where('id', $transaction->id)
-                ->update(['description' => $newDescription]);
+                $newDescription = $transaction->description . " | HPP Order ID: {$hppOrderId} | " . $checkLink;
+
+                Capsule::table('tblaccounts')
+                    ->where('id', $transaction->id)
+                    ->update(['description' => $newDescription]);
+            }
+
+            logTransaction(
+                $gatewayParams['name'],
+                $payload,
+                "Payment Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
+            );
         }
-
-        logTransaction(
-            $gatewayParams['name'],
-            $payload,
-            "Payment Successful. HPP Order: {$hppOrderId}, 
-            Operation: {$operationId}"
-        );
     } else {
         logTransaction(
             $gatewayParams['name'],
@@ -89,6 +99,19 @@ try {
             "Payment Status: {$orderStatus}. HPP Order: {$hppOrderId}"
         );
     }
+
+    AlliancePayHelper::saveCallbackHistory(
+        payload: $payload,
+        operation: $operationArray,
+        invoiceId: (int)$invoiceId,
+        gatewayModuleName: $gatewayModuleName,
+        orderStatus: $orderStatus,
+        amountPaid: $amountPaid,
+        isCompleted: (
+            $orderStatus === AlliancePayHelper::STATUS_SUCCESS
+            && $operationStatus === AlliancePayHelper::STATUS_SUCCESS
+        ),
+    );
 
     http_response_code(200);
     echo 'OK';

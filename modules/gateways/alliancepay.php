@@ -5,20 +5,23 @@
 
 declare(strict_types=1);
 
-if (!defined("WHMCS")) die("This file cannot be accessed directly");
+if (!defined("WHMCS")) {
+    die("This file cannot be accessed directly");
+}
 
 require_once __DIR__ . '/alliancepay/vendor/autoload.php';
 require_once __DIR__ . '/alliancepay/AlliancePayHelper.php';
 
 use AlliancePay\Sdk\Payment\Dto\Order\OrderRequestDTO;
 use AlliancePay\Sdk\Payment\Order\CreateOrder;
-use \WHMCS\Database\Capsule;
+use WHMCS\Database\Capsule;
 use League\ISO3166\ISO3166;
 use AlliancePay\Sdk\Services\RequestIdentification\GenerateRequestIdentification;
 use AlliancePay\Sdk\Payment\Refund\RefundOrder;
 use AlliancePay\Sdk\Payment\Dto\Refund\RefundRequestDTO;
 use AlliancePay\Sdk\Services\DateTime\DateTimeImmutableProvider;
-use alliancepay\AlliancePayHelper;
+use AlliancePay\AlliancePayHelper;
+use AlliancePay\Sdk\Exceptions\AuthenticationException;
 
 function alliancepay_MetaData()
 {
@@ -34,16 +37,19 @@ function alliancepay_config($params)
 {
     $gatewaySettings = [];
     try {
-        foreach (Capsule::table('tblpaymentgateways')->where('gateway', 'alliancepay')->get() as $row) {
+        $settings = Capsule::table('tblpaymentgateways')
+            ->where('gateway', AlliancePayHelper::GATEWAY_MODULE_NAME)
+            ->get();
+        foreach ($settings as $row) {
             $gatewaySettings[$row->setting] = $row->value;
         }
     } catch (Exception $e) {
-        // Ignore any errors.
+        logModuleCall(AlliancePayHelper::GATEWAY_MODULE_NAME, 'Config DB Error', [], $e->getMessage());
     }
 
     $merchantId = $params['merchantId'] ?? '';
 
-    $authData = getAuthtorizationDataHtml($merchantId);
+    $authData = AlliancePayHelper::getAuthorizationDataHtml($merchantId);
 
     return [
         'FriendlyName' => ['Type' => 'System', 'Value' => 'AlliancePay Bank'],
@@ -52,6 +58,24 @@ function alliancepay_config($params)
             'Type' => 'text',
             'Size' => '100',
             'Default' => 'https://api-ecom-prod.bankalliance.ua/',
+        ],
+        'paymentType' => [
+            'FriendlyName' => 'Payment Type',
+            'Type' => 'dropdown',
+            'Options' => [
+                AlliancePayHelper::HPP_PAY_TYPE_PURCHASE => AlliancePayHelper::HPP_PAY_TYPE_PURCHASE,
+                AlliancePayHelper::HPP_PAY_TYPE_A2A      => AlliancePayHelper::HPP_PAY_TYPE_A2A,
+            ],
+            'Default' => AlliancePayHelper::HPP_PAY_TYPE_PURCHASE,
+        ],
+        'statusPageType' => [
+            'FriendlyName' => 'Status Page Type',
+            'Type' => 'dropdown',
+            'Options' => [
+                AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT => AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT,
+                AlliancePayHelper::STATUS_PAGE_TYPE_TIMER   => AlliancePayHelper::STATUS_PAGE_TYPE_TIMER,
+            ],
+            'Default' => AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT,
         ],
         'merchantId' => ['FriendlyName' => 'Merchant ID', 'Type' => 'text', 'Size' => '50'],
         'serviceCode' => ['FriendlyName' => 'Service Code', 'Type' => 'text', 'Size' => '50'],
@@ -69,53 +93,11 @@ function alliancepay_config($params)
     ];
 }
 
-function getAuthtorizationDataHtml(string $merchantId): string
-{
-    $authData = '<div style="margin-top: 5px; padding: 15px; background: #f8f9fa;'
-        . ' border: 1px solid #ddd; border-radius: 4px; max-width: 600px;">';
-
-    if (empty($merchantId)) {
-        $authData .= '<span style="color: #f0ad4e; font-weight: bold;">'
-            . 'Вкажіть Merchant ID та збережіть налаштування для перевірки сесії.</span>';
-    } else {
-        $cached = AlliancePayHelper::getCachedSettings($merchantId);
-
-        if (empty($cached)) {
-            $authData .= '<span style="color: #d9534f; font-weight: bold;">'
-                . 'Кеш порожній. Токени будуть згенеровані автоматично під час першого платежу.</span>';
-        } else {
-            $serverPublic = $cached['serverPublic'] ?? '';
-            if (is_array($serverPublic)) {
-                $serverPublic = json_encode($serverPublic);
-            }
-
-            $authData .= '<strong>Expiration:</strong> '
-                . htmlspecialchars($cached['tokenExpirationDateTime'] ?? 'N/A') . '<br>';
-            $authData .= '<strong>Device ID:</strong> '
-                . htmlspecialchars($cached['deviceId'] ?? 'N/A') . '<br>';
-            $authData .= '<strong>Auth Token:</strong> '
-                . htmlspecialchars($cached['authToken'] ?? '') . '<br>';
-            $authData .= '<strong>Refresh Token:</strong> '
-                . htmlspecialchars($cached['refreshToken'] ?? '') . '<br>';
-            $authData .= '<strong>Server Public (JSON):</strong><br>';
-            $authData .= '<textarea readonly style="width: 100%; height: 70px; margin-top: 5px;'
-                . ' font-family: monospace; font-size: 11px; background: #e9ecef;">'
-                . htmlspecialchars($serverPublic) . '</textarea>';
-        }
-    }
-    $authData .= '</div>';
-    $authData .= '<script>jQuery(document).ready(function($) { '
-        . '$("textarea[name=\'field[alliancepay][authenticationKey]\']").css('
-        . '{"-webkit-text-security": "disc", "font-family": "monospace"}); });</script>';
-
-    return $authData;
-}
-
 function alliancepay_link($params)
 {
     if (isset($_POST['alliancepay_action']) && $_POST['alliancepay_action'] === 'create_order') {
 
-        $maxAttempts = 2;
+        $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
         $attempt = 1;
         $authDto = null;
 
@@ -153,16 +135,17 @@ function alliancepay_link($params)
                 $orderData = [
                     'merchantRequestId' => $merchantRequestId,
                     'merchantId' => $authDto->getMerchantId(),
-                    'hppPayType' => 'PURCHASE',
+                    'hppPayType' => $params['paymentType'] ?? AlliancePayHelper::HPP_PAY_TYPE_PURCHASE,
                     'coinAmount' => $coinAmount,
-                    'paymentMethods' => ['CARD', 'APPLE_PAY', 'GOOGLE_PAY'],
+                    'directType' => AlliancePayHelper::DIRECT_TYPE_REDIRECT,
+                    'paymentMethods' => AlliancePayHelper::HPP_PAYMENT_METHODS,
                     'successUrl' => $params['returnurl'],
                     'failUrl' => $params['returnurl'],
-                    'statusPageType' => 'STATUS_TIMER_PAGE',
+                    'statusPageType' => $params['statusPageType'] ?? AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT,
                     'notificationUrl' => $callbackUrl,
                     'purpose' => 'Invoice #' . $params['invoiceid'],
                     'customerData' => [
-                        'senderCustomerId' => (string)$params['clientdetails']['userid'] ?? '',
+                        'senderCustomerId' => (string)($params['clientdetails']['userid'] ?? ''),
                         'senderFirstName' => $params['clientdetails']['firstname'] ?? '',
                         'senderLastName' => $params['clientdetails']['lastname'] ?? '',
                         'senderEmail' => $params['clientdetails']['email'] ?? '',
@@ -174,6 +157,12 @@ function alliancepay_link($params)
                         'senderPhone' => $phone,
                     ],
                 ];
+
+                if ($orderData['hppPayType'] === AlliancePayHelper::HPP_PAY_TYPE_A2A) {
+                    $orderData['directType'] = AlliancePayHelper::DIRECT_TYPE_BANK_LINK;
+                    $orderData['priorityBankCode'] = AlliancePayHelper::A2A_PRIORITY_BANK_CODE;
+                    $orderData['merchantComment'] = 'Payment for invoice #' . ($params['invoiceid'] ?? '');
+                }
 
                 if (!empty($countryCode)) {
                     $orderData['customerData']['senderCountry'] = $countryCode;
@@ -196,18 +185,23 @@ function alliancepay_link($params)
 
                 $redirectUrl = $response->getRedirectUrl();
 
+                if (!str_starts_with($redirectUrl, 'https://')) {
+                    throw new \UnexpectedValueException('Invalid redirect URL received from payment gateway.');
+                }
+
                 header("Location: " . $redirectUrl);
                 exit;
 
             } catch (Exception $e) {
                 $errorMsg = $e->getMessage();
-                $isAuthError = strpos($errorMsg, '401') !== false ||
-                               strpos($errorMsg, 'b_used_token') !== false ||
-                               strpos($errorMsg, 'b_auth_token_expired') !== false;
+                $isAuthError = $e->getPrevious() instanceof AuthenticationException
+                    || strpos($errorMsg, '401') !== false
+                    || strpos($errorMsg, 'b_used_token') !== false
+                    || strpos($errorMsg, 'b_auth_token_expired') !== false;
 
                 if ($isAuthError && $attempt < $maxAttempts) {
                     logModuleCall(
-                        'alliancepay', "Create Order Token Invalid - Retrying",
+                        AlliancePayHelper::GATEWAY_MODULE_NAME, "Create Order Token Invalid - Retrying",
                         $errorMsg,
                         "Attempt: $attempt"
                     );
@@ -217,9 +211,9 @@ function alliancepay_link($params)
                 }
 
                 logModuleCall(
-                    'alliancepay',
+                    AlliancePayHelper::GATEWAY_MODULE_NAME,
                     'Create Order Error',
-                    isset($orderData) ? $orderData : $params,
+                    $orderData ?? $params,
                     $errorMsg
                 );
 
@@ -240,7 +234,22 @@ function alliancepay_link($params)
 
 function alliancepay_refund($params)
 {
-    $maxAttempts = 2;
+    if (AlliancePayHelper::isRefundForbidden((int)$params['invoiceid'])) {
+        logModuleCall(
+            AlliancePayHelper::GATEWAY_MODULE_NAME,
+            'Refund Forbidden',
+            ['invoiceid' => $params['invoiceid'], 'transid' => $params['transid']],
+            'Refund is not allowed for ACCOUNT_2_ACCOUNT transactions (transactionType 102).'
+        );
+
+        return [
+            'status' => 'error',
+            'rawdata' => 'Refund is not allowed for this transaction type.',
+            'transid' => $params['transid'],
+        ];
+    }
+
+    $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
     $attempt = 1;
     $authDto = null;
 
@@ -268,7 +277,7 @@ function alliancepay_refund($params)
 
             $result = $refundService->createRefund($refundDto, $authDto);
 
-            logModuleCall('alliancepay', "Refund Success (Attempt $attempt)", $refundData, $result);
+            logModuleCall(AlliancePayHelper::GATEWAY_MODULE_NAME, "Refund Success (Attempt $attempt)", $refundData, $result);
 
             return [
                 'status' => 'success',
@@ -278,18 +287,19 @@ function alliancepay_refund($params)
 
         } catch (Exception $e) {
             $errorMsg = $e->getMessage();
-            $isAuthError = strpos($errorMsg, '401') !== false ||
-                           strpos($errorMsg, 'b_used_token') !== false ||
-                           strpos($errorMsg, 'b_auth_token_expired') !== false;
+            $isAuthError = $e->getPrevious() instanceof AuthenticationException
+                || strpos($errorMsg, '401') !== false
+                || strpos($errorMsg, 'b_used_token') !== false
+                || strpos($errorMsg, 'b_auth_token_expired') !== false;
 
             if ($isAuthError && $attempt < $maxAttempts) {
-                logModuleCall('alliancepay', "Refund Token Invalid - Retrying", $errorMsg, "Attempt: $attempt");
+                logModuleCall(AlliancePayHelper::GATEWAY_MODULE_NAME, "Refund Token Invalid - Retrying", $errorMsg, "Attempt: $attempt");
                 $authDto = AlliancePayHelper::forceReauthorize($params);
                 $attempt++;
                 continue;
             }
 
-            logModuleCall('alliancepay', 'Refund Error', $errorMsg, $params['transid']);
+            logModuleCall(AlliancePayHelper::GATEWAY_MODULE_NAME, 'Refund Error', $errorMsg, $params['transid']);
 
             return [
                 'status' => 'error',

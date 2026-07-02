@@ -12,7 +12,8 @@ require_once __DIR__ . '/AlliancePayHelper.php';
 
 use WHMCS\Authentication\CurrentUser;
 use AlliancePay\Sdk\Payment\Order\CheckOrderData;
-use alliancepay\AlliancePayHelper;
+use AlliancePay\AlliancePayHelper;
+use AlliancePay\Sdk\Exceptions\AuthenticationException;
 
 $currentUser = new CurrentUser();
 if (!$currentUser->isAuthenticatedAdmin()) {
@@ -22,40 +23,43 @@ if (!$currentUser->isAuthenticatedAdmin()) {
 
 $hppOrderId = $_GET['hppOrderId'] ?? '';
 $errorMsg = '';
-$orderDataArray = [];
 $amount = 0;
 
 if (empty($hppOrderId)) {
     $errorMsg = 'Ідентифікатор замовлення (hppOrderId) не вказано.';
 } else {
-    $gatewayParams = getGatewayVariables('alliancepay');
+    $gatewayParams = getGatewayVariables(AlliancePayHelper::GATEWAY_MODULE_NAME);
 
     if (!$gatewayParams['type']) {
         $errorMsg = 'Платіжний модуль AlliancePay не активовано.';
     } else {
-        $maxAttempts = 2;
+        $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
         $attempt = 1;
         $authDto = null;
 
         while ($attempt <= $maxAttempts) {
             try {
                 if (!$authDto) {
-                    $gatewayParams['authenticationKey'] = html_entity_decode($gatewayParams['authenticationKey'], ENT_QUOTES, 'UTF-8');
+                    $gatewayParams['authenticationKey'] = html_entity_decode(
+                            $gatewayParams['authenticationKey'],
+                            ENT_QUOTES,
+                            'UTF-8'
+                    );
                     $authDto = AlliancePayHelper::getAuthDto($gatewayParams);
                 }
 
                 $checkService = new CheckOrderData();
                 $orderStatus = $checkService->checkOrderData($hppOrderId, $authDto);
-
-                $orderDataArray = $orderStatus->toArray();
-                $amount = isset($orderDataArray['coinAmount']) ? ($orderDataArray['coinAmount'] / 100) : 0;
+                $amount = $orderStatus->getCoinAmount() !== null ? ($orderStatus->getCoinAmount() / 100) : 0;
                 break;
 
             } catch (\Exception $e) {
                 $exceptionMsg = $e->getMessage();
-                $isAuthError = strpos($exceptionMsg, '401') !== false ||
-                        strpos($exceptionMsg, 'b_used_token') !== false ||
-                        strpos($exceptionMsg, 'b_auth_token_expired') !== false;
+                $isAuthError = $e instanceof AuthenticationException
+                    || $e->getPrevious() instanceof AuthenticationException
+                    || strpos($exceptionMsg, '401') !== false
+                    || strpos($exceptionMsg, 'b_used_token') !== false
+                    || strpos($exceptionMsg, 'b_auth_token_expired') !== false;
 
                 if ($isAuthError && $attempt < $maxAttempts) {
                     $authDto = AlliancePayHelper::forceReauthorize($gatewayParams);
@@ -112,23 +116,25 @@ if (empty($hppOrderId)) {
                             <th scope="row" class="bg-light">Статус замовлення</th>
                             <td>
                                 <?php
-                                $status = $orderDataArray['orderStatus'] ?? 'UNKNOWN';
+                                $status = $orderStatus->getOrderStatus() ?? 'UNKNOWN';
                                 $badgeClass = 'bg-secondary';
-                                if ($status === 'SUCCESS') $badgeClass = 'bg-success';
-                                if ($status === 'PENDING') $badgeClass = 'bg-warning text-dark';
-                                if ($status === 'REJECTED' || $status === 'FAIL') $badgeClass = 'bg-danger';
+                                if ($status === AlliancePayHelper::STATUS_SUCCESS) $badgeClass = 'bg-success';
+                                if ($status === AlliancePayHelper::STATUS_PENDING) $badgeClass = 'bg-warning text-dark';
+                                if ($status === AlliancePayHelper::STATUS_REJECTED || $status === AlliancePayHelper::STATUS_FAIL) $badgeClass = 'bg-danger';
                                 ?>
-                                <span class="badge <?= $badgeClass ?> fs-6"><?= $status ?></span>
+                                <span class="badge <?= $badgeClass ?> fs-6"><?= htmlspecialchars($status) ?></span>
                             </td>
                         </tr>
                         <tr>
                             <th scope="row" class="bg-light">Сума</th>
                             <td class="fs-5 fw-bold"><?= number_format($amount, 2, '.', '') ?></td>
                         </tr>
-                        <?php if (!empty($orderDataArray['statusUrl'])): ?>
+                        <?php if (!empty($orderStatus->getStatusUrl())): ?>
                         <tr>
                             <th scope="row" class="bg-light">Status URL</th>
-                            <td><a href="<?= htmlspecialchars($orderDataArray['statusUrl']) ?>" target="_blank" class="text-decoration-none small text-truncate d-block" style="max-width: 400px;"><?= htmlspecialchars($orderDataArray['statusUrl']) ?></a></td>
+                            <td><a href="<?= htmlspecialchars($orderStatus->getStatusUrl()) ?>"
+                                   target="_blank" class="text-decoration-none small text-truncate d-block"
+                                   style="max-width: 400px;"><?= htmlspecialchars($orderStatus->getStatusUrl()) ?></a></td>
                         </tr>
                         <?php endif; ?>
                     </tbody>
@@ -138,10 +144,10 @@ if (empty($hppOrderId)) {
 
                 <h5 class="mb-3 text-muted"><i class="fas fa-list-ul me-2"></i>Історія операцій (Operations)</h5>
 
-                <?php if (!empty($orderDataArray['operations']) && is_array($orderDataArray['operations'])): ?>
-                    <?php foreach ($orderDataArray['operations'] as $op): ?>
+                <?php if (!empty($orderStatus->getOperations()) && is_array($orderStatus->getOperations())): ?>
+                    <?php foreach ($orderStatus->getOperations() as $op): ?>
                         <?php
-                        $isSuccess = ($op->getStatus() ?? '') === 'SUCCESS';
+                        $isSuccess = ($op->getStatus() ?? '') === AlliancePayHelper::STATUS_SUCCESS;
                         $opClass = $isSuccess ? 'op-status-success' : 'op-status-error';
                         ?>
                         <div class="card op-card <?= $opClass ?> shadow-sm">
@@ -153,7 +159,7 @@ if (empty($hppOrderId)) {
                                     </div>
                                     <div class="col-md-4">
                                         <div class="small text-muted text-uppercase fw-bold">Дата обробки</div>
-                                        <div class="small"><?= htmlspecialchars($op->getProcessingDateTime()->format('d-m-Y H:i:s') ?? 'N/A') ?></div>
+                                        <div class="small"><?= htmlspecialchars($op->getCreationDateTime() ? $op->getCreationDateTime()->format('d-m-Y H:i:s') : 'N/A') ?></div>
                                     </div>
                                     <div class="col-md-4 text-end">
                                         <span class="badge <?= $isSuccess ? 'bg-success' : 'bg-danger' ?>">
@@ -166,7 +172,7 @@ if (empty($hppOrderId)) {
                                         <div class="small text-muted">ID операції: <span class="font-monospace"><?= htmlspecialchars($op->getOperationId() ?? 'N/A') ?></span></div>
                                     </div>
                                     <div class="col-md-5 text-end">
-                                        <?php $receiptUrl = $op->getType() !== 'REFUND' ? $op->getReceiptUrl() : ''; ?>
+                                        <?php $receiptUrl = $op->getType() !== AlliancePayHelper::OPERATION_TYPE_REFUND ? $op->getReceiptUrl() : ''; ?>
                                         <?php if (!empty($receiptUrl)): ?>
                                             <a href="<?= htmlspecialchars($op->getReceiptUrl()) ?>" target="_blank" class="btn btn-sm btn-outline-primary">
                                                 <i class="fas fa-file-invoice"></i> Квитанція

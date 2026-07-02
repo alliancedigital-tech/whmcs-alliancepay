@@ -11,11 +11,11 @@
     ],
     "require": {
         "php": ">=8.0",
-        "ext-sodium": "*",
-        "ext-hash": "*",
         "ext-gmp": "*",
+        "ext-hash": "*",
         "ext-openssl": "*",
-        "alliance/alliancepay-payment-sdk": "*",
+        "ext-sodium": "*",
+        "alliance/alliancepay-payment-sdk": "^1.2.0",
         "league/iso3166": "4.3.3"
     },
     "config": {
