@@ -52,15 +52,52 @@ try {
     $operationId = $operationArray['operationId'] ?? '';
     $amountPaid = (float)($callbackData['coinAmount'] / 100);
 
-    if ($orderStatus === AlliancePayHelper::STATUS_SUCCESS && $operationStatus === AlliancePayHelper::STATUS_SUCCESS) {
+    $operationType = $operationArray['type'] ?? '';
 
-        $operationType = $operationArray['type'] ?? '';
+    if ($orderStatus === AlliancePayHelper::STATUS_SUCCESS && $operationStatus === AlliancePayHelper::STATUS_SUCCESS) {
 
         if ($operationType === AlliancePayHelper::OPERATION_TYPE_REFUND) {
             logTransaction(
                 $gatewayParams['name'],
                 $payload,
                 "Refund Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
+            );
+        } elseif ($operationType === AlliancePayHelper::OPERATION_TYPE_PREAUTH) {
+            logTransaction(
+                $gatewayParams['name'],
+                $payload,
+                "PREAUTH Authorized. HPP Order: {$hppOrderId}, Operation: {$operationId}"
+            );
+        } elseif ($operationType === AlliancePayHelper::OPERATION_TYPE_COMPLETION) {
+            $invoiceId = checkCbInvoiceID($invoiceId, $gatewayParams['name']);
+
+            checkCbTransID($operationId);
+            addInvoicePayment($invoiceId, $operationId, $amountPaid, 0, $gatewayModuleName);
+
+            AlliancePayHelper::markPreAuthCompleted((int)$invoiceId, $hppOrderId);
+
+            $transaction = Capsule::table('tblaccounts')
+                ->where('transid', $operationId)
+                ->where('invoiceid', $invoiceId)
+                ->orderBy('id', 'desc')
+                ->first();
+
+            if ($transaction) {
+                $checkLink = "<a href=\"../modules/gateways/alliancepay/admin_status.php?hppOrderId="
+                    . $hppOrderId
+                    . "\" target=\"_blank\" style=\"color:blue; text-decoration:underline;\">Check Order</a>";
+
+                $newDescription = $transaction->description . " | HPP Order ID: {$hppOrderId} | " . $checkLink;
+
+                Capsule::table('tblaccounts')
+                    ->where('id', $transaction->id)
+                    ->update(['description' => $newDescription]);
+            }
+
+            logTransaction(
+                $gatewayParams['name'],
+                $payload,
+                "Completion Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
         } else {
             $invoiceId = checkCbInvoiceID($invoiceId, $gatewayParams['name']);
@@ -110,6 +147,7 @@ try {
         isCompleted: (
             $orderStatus === AlliancePayHelper::STATUS_SUCCESS
             && $operationStatus === AlliancePayHelper::STATUS_SUCCESS
+            && $operationType !== AlliancePayHelper::OPERATION_TYPE_PREAUTH
         ),
     );
 

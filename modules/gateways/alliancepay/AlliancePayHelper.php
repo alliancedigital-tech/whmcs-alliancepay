@@ -36,6 +36,16 @@ class AlliancePayHelper
 
     public const HPP_PAY_TYPE_A2A = 'A2A';
 
+    public const HPP_PAY_TYPE_PREAUTH = 'PREAUTH';
+
+    public const OPERATION_TYPE_PREAUTH = 'PREAUTH';
+
+    public const OPERATION_TYPE_COMPLETION = 'COMPLETION';
+
+    public const PREAUTH_EXP_DATE_DEFAULT = '2h';
+
+    public const PREAUTH_EXP_DATE_OPTIONS = ['2h', '4h', '6h', '12h', '1d', '2d', '7d', '14d', '28d'];
+
     public const HPP_PAYMENT_METHODS = ['CARD', 'APPLE_PAY', 'GOOGLE_PAY'];
 
     public const DIRECT_TYPE_REDIRECT = 'REDIRECT';
@@ -263,6 +273,10 @@ class AlliancePayHelper
             unset($info['operation']);
             $info['operations'] = $operations;
 
+            if (!isset($info['original_coin_amount']) && !empty($existingData['original_coin_amount'])) {
+                $info['original_coin_amount'] = $existingData['original_coin_amount'];
+            }
+
             Capsule::table('tbltransaction_history')
                 ->where('invoice_id', $invoiceId)
                 ->where('transaction_id', $hppOrderId)
@@ -293,6 +307,105 @@ class AlliancePayHelper
                 'updated_at' => date('Y-m-d H:i:s'),
             ]);
         }
+    }
+
+    /**
+     * @param string $option
+     * @return int
+     */
+    public static function getPreAuthExpSeconds(string $option): int
+    {
+        $map = [
+            '2h' => 7200,
+            '4h' => 14400,
+            '6h' => 21600,
+            '12h' => 43200,
+            '1d' => 86400,
+            '2d' => 172800,
+            '7d' => 604800,
+            '14d' => 1209600,
+            '28d' => 2419200,
+        ];
+
+        return $map[$option] ?? 7200;
+    }
+
+    /**
+     * @param int $invoiceId
+     * @param string $hppOrderId
+     * @param string $merchantRequestId
+     * @param int $coinAmount
+     * @param string $gatewayModuleName
+     * @return void
+     */
+    public static function savePreAuthOrderData(
+        int    $invoiceId,
+        string $hppOrderId,
+        string $merchantRequestId,
+        int    $coinAmount,
+        string $gatewayModuleName
+    ): void
+    {
+        $existing = Capsule::table('tbltransaction_history')
+            ->where('invoice_id', $invoiceId)
+            ->where('transaction_id', $hppOrderId)
+            ->first();
+
+        if ($existing) {
+            return;
+        }
+
+        $info = [
+            'hppPayType' => self::HPP_PAY_TYPE_PREAUTH,
+            'original_coin_amount' => $coinAmount,
+            'merchantRequestId' => $merchantRequestId,
+            'hppOrderId' => $hppOrderId,
+            'operations' => [],
+        ];
+
+        Capsule::table('tbltransaction_history')->insert([
+            'invoice_id' => $invoiceId,
+            'gateway' => $gatewayModuleName,
+            'transaction_id' => $hppOrderId,
+            'remote_status' => self::STATUS_PENDING,
+            'completed' => 0,
+            'description' => 'AlliancePay PREAUTH order created',
+            'additional_information' => json_encode($info, JSON_UNESCAPED_UNICODE),
+            'amount' => $coinAmount / 100,
+            'currency_id' => 0,
+            'created_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /**
+     * @param int $invoiceId
+     * @return object|null
+     */
+    public static function getPreAuthPendingRecord(int $invoiceId): ?object
+    {
+        return Capsule::table('tbltransaction_history')
+            ->where('invoice_id', $invoiceId)
+            ->where('completed', 0)
+            ->where('additional_information', 'like', '%"hppPayType":"PREAUTH"%')
+            ->orderBy('id', 'desc')
+            ->first();
+    }
+
+    /**
+     * @param int $invoiceId
+     * @param string $hppOrderId
+     * @return void
+     */
+    public static function markPreAuthCompleted(int $invoiceId, string $hppOrderId): void
+    {
+        Capsule::table('tbltransaction_history')
+            ->where('invoice_id', $invoiceId)
+            ->where('transaction_id', $hppOrderId)
+            ->update([
+                'completed' => 1,
+                'updated_at' => date('Y-m-d H:i:s'),
+            ]);
     }
 
     /**

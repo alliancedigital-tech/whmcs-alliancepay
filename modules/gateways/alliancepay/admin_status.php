@@ -12,6 +12,10 @@ require_once __DIR__ . '/AlliancePayHelper.php';
 
 use WHMCS\Authentication\CurrentUser;
 use AlliancePay\Sdk\Payment\Order\CheckOrderData;
+use AlliancePay\Sdk\Payment\Order\CreateOrderCompletion;
+use AlliancePay\Sdk\Payment\Dto\Order\OrderRequestCompletionDTO;
+use AlliancePay\Sdk\Services\RequestIdentification\GenerateRequestIdentification;
+use AlliancePay\Sdk\Services\DateTime\DateTimeImmutableProvider;
 use AlliancePay\AlliancePayHelper;
 use AlliancePay\Sdk\Exceptions\AuthenticationException;
 
@@ -24,6 +28,137 @@ if (!$currentUser->isAuthenticatedAdmin()) {
 $hppOrderId = $_GET['hppOrderId'] ?? '';
 $errorMsg = '';
 $amount = 0;
+$completionResult = null;
+$completionError = null;
+$completionSuccess = isset($_GET['completed']) && $_GET['completed'] === '1';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'complete') {
+    $postInvoiceId = (int)($_POST['invoiceid'] ?? 0);
+
+    if (!$postInvoiceId) {
+        $completionError = 'Не вказано invoiceid для підтвердження.';
+    } else {
+        $record = AlliancePayHelper::getPreAuthPendingRecord($postInvoiceId);
+
+        if (!$record) {
+            $completionError = 'Не знайдено активного PREAUTH-запису для інвойсу #' . $postInvoiceId . '.';
+        } else {
+            $info = json_decode($record->additional_information, true) ?? [];
+            $operations = $info['operations'] ?? [];
+            $originalAmount = 0;
+            $originalOpId = '';
+
+            foreach ($operations as $op) {
+                if (($op['type'] ?? '') === AlliancePayHelper::OPERATION_TYPE_PREAUTH
+                        && ($op['status'] ?? '') === AlliancePayHelper::STATUS_SUCCESS
+                        && !empty($op['operationId'])
+                ) {
+                    $originalOpId = $op['operationId'];
+                    $originalAmount = (int)($op['coinAmount'] ?? $info['original_coin_amount'] ?? 0);
+                    break;
+                }
+            }
+
+            if (!$originalAmount) {
+                $originalAmount = (int)($info['original_coin_amount'] ?? 0);
+            }
+            if (!$originalOpId) {
+                foreach ($operations as $op) {
+                    if (!empty($op['operationId'])) {
+                        $originalOpId = $op['operationId'];
+                        break;
+                    }
+                }
+            }
+
+            if (!$originalAmount || !$originalOpId) {
+                $completionError = 'Відсутні coinAmount або operationId в записі PREAUTH.';
+            } else {
+                $compGatewayParams = getGatewayVariables(AlliancePayHelper::GATEWAY_MODULE_NAME);
+                $systemUrl = rtrim($compGatewayParams['systemurl'] ?? '', '/');
+                $callbackUrl = $systemUrl
+                        . '/modules/gateways/callback/alliancepay.php?invoiceid='
+                        . $postInvoiceId;
+
+                $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
+                $attempt = 1;
+                $compAuthDto = null;
+
+                while ($attempt <= $maxAttempts) {
+                    try {
+                        if (!$compAuthDto) {
+                            $compGatewayParams['authenticationKey'] = html_entity_decode(
+                                    $compGatewayParams['authenticationKey'],
+                                    ENT_QUOTES,
+                                    'UTF-8'
+                            );
+                            $compAuthDto = AlliancePayHelper::getAuthDto($compGatewayParams);
+                        }
+
+                        $date = DateTimeImmutableProvider::nowByTimezone(DateTimeImmutableProvider::KYIV_TIMEZONE);
+
+                        $completionData = OrderRequestCompletionDTO::fromArray([
+                                'merchantRequestId' => GenerateRequestIdentification::generateRequestId(),
+                                'merchantId' => $compAuthDto->getMerchantId(),
+                                'originalOperationId' => $originalOpId,
+                                'coinAmount' => $originalAmount,
+                                'date' => $date,
+                                'notificationUrl' => $callbackUrl,
+                        ]);
+
+                        $completionService = new CreateOrderCompletion();
+                        $completionResult = $completionService->createCompletion(
+                                $completionData,
+                                $compAuthDto,
+                                $originalAmount
+                        );
+
+                        logModuleCall(
+                                AlliancePayHelper::GATEWAY_MODULE_NAME,
+                                'PreAuth Completion Success (Admin)',
+                                [
+                                        'invoiceId' => $postInvoiceId,
+                                        'originalOperationId' => $originalOpId,
+                                        'coinAmount' => $originalAmount,
+                                ],
+                                $completionResult->toArray()
+                        );
+
+                        header('Location: ?hppOrderId=' . urlencode($hppOrderId) . '&completed=1');
+                        exit;
+
+                    } catch (Exception $e) {
+                        $exMsg = $e->getMessage();
+                        $isAuthError = $e->getPrevious() instanceof AuthenticationException
+                                || $e instanceof AuthenticationException
+                                || strpos($exMsg, '401') !== false
+                                || strpos($exMsg, 'b_used_token') !== false
+                                || strpos($exMsg, 'b_auth_token_expired') !== false;
+
+                        if ($isAuthError && $attempt < $maxAttempts) {
+                            $compAuthDto = AlliancePayHelper::forceReauthorize($compGatewayParams);
+                            $attempt++;
+                            continue;
+                        }
+
+                        $completionError = 'Помилка Completion API: ' . $exMsg;
+                        logModuleCall(
+                                AlliancePayHelper::GATEWAY_MODULE_NAME,
+                                'PreAuth Completion Error (Admin)',
+                                [
+                                        'invoiceId' => $postInvoiceId,
+                                        'originalOpId' => $originalOpId,
+                                        $completionData->toArray()
+                                ],
+                                $exMsg
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
 
 if (empty($hppOrderId)) {
     $errorMsg = 'Ідентифікатор замовлення (hppOrderId) не вказано.';
@@ -83,12 +218,41 @@ if (empty($hppOrderId)) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { background-color: #f4f6f9; padding: 40px 20px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .card { max-width: 800px; margin: 0 auto; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border: none; border-radius: 8px; }
-        .card-header { background-color: #fff; border-bottom: 2px solid #f0f2f5; padding: 20px; border-radius: 8px 8px 0 0 !important; }
-        .op-card { border-left: 4px solid #0d6efd; background-color: #fff; margin-bottom: 15px; border-radius: 4px; }
-        .op-status-success { border-left-color: #198754; }
-        .op-status-error { border-left-color: #dc3545; }
+        body {
+            background-color: #f4f6f9;
+            padding: 40px 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .card {
+            max-width: 800px;
+            margin: 0 auto;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            border: none;
+            border-radius: 8px;
+        }
+
+        .card-header {
+            background-color: #fff;
+            border-bottom: 2px solid #f0f2f5;
+            padding: 20px;
+            border-radius: 8px 8px 0 0 !important;
+        }
+
+        .op-card {
+            border-left: 4px solid #0d6efd;
+            background-color: #fff;
+            margin-bottom: 15px;
+            border-radius: 4px;
+        }
+
+        .op-status-success {
+            border-left-color: #198754;
+        }
+
+        .op-status-error {
+            border-left-color: #dc3545;
+        }
     </style>
 </head>
 <body>
@@ -96,49 +260,95 @@ if (empty($hppOrderId)) {
 <div class="container">
     <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0 text-dark"><i class="fas fa-search-dollar text-primary me-2"></i> Деталі замовлення AlliancePay</h4>
+            <h4 class="mb-0 text-dark"><i class="fas fa-search-dollar text-primary me-2"></i> Деталі замовлення
+                AlliancePay</h4>
             <span class="badge bg-secondary">WHMCS Admin Interface</span>
         </div>
         <div class="card-body p-4">
 
+            <?php if ($completionSuccess): ?>
+                <div class="alert alert-success"><i class="fas fa-check-circle me-2"></i>
+                    Completion успішно виконано. Очікуйте підтвердження від банку через callback.
+                </div>
+            <?php endif; ?>
+
+            <?php if (!empty($completionError)): ?>
+                <div class="alert alert-danger"><i
+                            class="fas fa-exclamation-triangle me-2"></i> <?= htmlspecialchars($completionError) ?>
+                </div>
+            <?php endif; ?>
+
             <?php if ($errorMsg): ?>
-                <div class="alert alert-danger mb-0"><i class="fas fa-exclamation-triangle me-2"></i> <?= htmlspecialchars($errorMsg) ?></div>
+                <div class="alert alert-danger mb-0"><i
+                            class="fas fa-exclamation-triangle me-2"></i> <?= htmlspecialchars($errorMsg) ?></div>
             <?php else: ?>
 
                 <h5 class="mb-3 text-muted">Загальна інформація</h5>
                 <table class="table table-bordered mb-4">
                     <tbody>
-                        <tr>
-                            <th scope="row" class="w-40 bg-light">HPP Order ID</th>
-                            <td class="font-monospace"><?= htmlspecialchars($hppOrderId) ?></td>
-                        </tr>
-                        <tr>
-                            <th scope="row" class="bg-light">Статус замовлення</th>
-                            <td>
-                                <?php
-                                $status = $orderStatus->getOrderStatus() ?? 'UNKNOWN';
-                                $badgeClass = 'bg-secondary';
-                                if ($status === AlliancePayHelper::STATUS_SUCCESS) $badgeClass = 'bg-success';
-                                if ($status === AlliancePayHelper::STATUS_PENDING) $badgeClass = 'bg-warning text-dark';
-                                if ($status === AlliancePayHelper::STATUS_REJECTED || $status === AlliancePayHelper::STATUS_FAIL) $badgeClass = 'bg-danger';
-                                ?>
-                                <span class="badge <?= $badgeClass ?> fs-6"><?= htmlspecialchars($status) ?></span>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th scope="row" class="bg-light">Сума</th>
-                            <td class="fs-5 fw-bold"><?= number_format($amount, 2, '.', '') ?></td>
-                        </tr>
-                        <?php if (!empty($orderStatus->getStatusUrl())): ?>
+                    <tr>
+                        <th scope="row" class="w-40 bg-light">HPP Order ID</th>
+                        <td class="font-monospace"><?= htmlspecialchars($hppOrderId) ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row" class="bg-light">Статус замовлення</th>
+                        <td>
+                            <?php
+                            $status = $orderStatus->getOrderStatus() ?? 'UNKNOWN';
+                            $badgeClass = 'bg-secondary';
+                            if ($status === AlliancePayHelper::STATUS_SUCCESS) $badgeClass = 'bg-success';
+                            if ($status === AlliancePayHelper::STATUS_PENDING) $badgeClass = 'bg-warning text-dark';
+                            if ($status === AlliancePayHelper::STATUS_REJECTED || $status === AlliancePayHelper::STATUS_FAIL) $badgeClass = 'bg-danger';
+                            ?>
+                            <span class="badge <?= $badgeClass ?> fs-6"><?= htmlspecialchars($status) ?></span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row" class="bg-light">Сума</th>
+                        <td class="fs-5 fw-bold"><?= number_format($amount, 2, '.', '') ?></td>
+                    </tr>
+                    <?php if (!empty($orderStatus->getStatusUrl())): ?>
                         <tr>
                             <th scope="row" class="bg-light">Status URL</th>
                             <td><a href="<?= htmlspecialchars($orderStatus->getStatusUrl()) ?>"
                                    target="_blank" class="text-decoration-none small text-truncate d-block"
-                                   style="max-width: 400px;"><?= htmlspecialchars($orderStatus->getStatusUrl()) ?></a></td>
+                                   style="max-width: 400px;"><?= htmlspecialchars($orderStatus->getStatusUrl()) ?></a>
+                            </td>
                         </tr>
-                        <?php endif; ?>
+                    <?php endif; ?>
                     </tbody>
                 </table>
+
+                <?php
+                $isPreAuth = ($orderStatus->getHppPayType() ?? '') === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH;
+                $isPending = ($orderStatus->getOrderStatus() ?? '') === AlliancePayHelper::STATUS_SUCCESS;
+                $invoiceFromDb = null;
+                if ($isPreAuth) {
+                    $invoiceFromDb = \WHMCS\Database\Capsule::table('tbltransaction_history')
+                            ->where('transaction_id', $hppOrderId)
+                            ->where('completed', 0)
+                            ->value('invoice_id');
+                }
+                ?>
+
+                <?php if ($isPreAuth && $isPending && $invoiceFromDb && !$completionSuccess): ?>
+                    <div class="alert alert-warning d-flex align-items-center justify-content-between">
+                        <div>
+                            <i class="fas fa-info-circle me-2"></i>
+                            <strong>PREAUTH</strong> — кошти заблоковано, але ще не списано.
+                            Підтвердіть списання натисканням кнопки.
+                        </div>
+                        <form method="post" action="?hppOrderId=<?= htmlspecialchars($hppOrderId) ?>"
+                              onsubmit="return confirm('Підтвердити списання коштів (Completion)?');"
+                              class="ms-3">
+                            <input type="hidden" name="action" value="complete">
+                            <input type="hidden" name="invoiceid" value="<?= (int)$invoiceFromDb ?>">
+                            <button type="submit" class="btn btn-success btn-sm">
+                                <i class="fas fa-check-circle me-1"></i> Підтвердити списання
+                            </button>
+                        </form>
+                    </div>
+                <?php endif; ?>
 
                 <hr class="my-4">
 
@@ -169,12 +379,15 @@ if (empty($hppOrderId)) {
                                 </div>
                                 <div class="row mt-3 pt-2 border-top">
                                     <div class="col-md-7">
-                                        <div class="small text-muted">ID операції: <span class="font-monospace"><?= htmlspecialchars($op->getOperationId() ?? 'N/A') ?></span></div>
+                                        <div class="small text-muted">ID операції: <span
+                                                    class="font-monospace"><?= htmlspecialchars($op->getOperationId() ?? 'N/A') ?></span>
+                                        </div>
                                     </div>
                                     <div class="col-md-5 text-end">
                                         <?php $receiptUrl = $op->getType() !== AlliancePayHelper::OPERATION_TYPE_REFUND ? $op->getReceiptUrl() : ''; ?>
                                         <?php if (!empty($receiptUrl)): ?>
-                                            <a href="<?= htmlspecialchars($op->getReceiptUrl()) ?>" target="_blank" class="btn btn-sm btn-outline-primary">
+                                            <a href="<?= htmlspecialchars($op->getReceiptUrl()) ?>" target="_blank"
+                                               class="btn btn-sm btn-outline-primary">
                                                 <i class="fas fa-file-invoice"></i> Квитанція
                                             </a>
                                         <?php endif; ?>

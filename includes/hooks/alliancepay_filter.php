@@ -45,6 +45,67 @@ add_hook('ClientAreaPageCart', 1, function ($vars) {
     }
 });
 
+add_hook('AdminInvoicesControlsOutput', 1, function ($vars) {
+    $invoiceId = (int)($vars['invoiceid'] ?? 0);
+    if (!$invoiceId) {
+        return '';
+    }
+
+    require_once __DIR__ . '/../../modules/gateways/alliancepay/vendor/autoload.php';
+    require_once __DIR__ . '/../../modules/gateways/alliancepay/AlliancePayHelper.php';
+
+    $record = \AlliancePay\AlliancePayHelper::getPreAuthPendingRecord($invoiceId);
+    if (!$record) {
+        return '';
+    }
+
+    $info       = json_decode($record->additional_information, true) ?? [];
+    $hppOrderId = $record->transaction_id;
+    $operations = $info['operations'] ?? [];
+
+    $originalOpId   = '';
+    $originalAmount = 0;
+    foreach ($operations as $op) {
+        if (($op['type'] ?? '') === \AlliancePay\AlliancePayHelper::OPERATION_TYPE_PREAUTH
+            && ($op['status'] ?? '') === \AlliancePay\AlliancePayHelper::STATUS_SUCCESS
+            && !empty($op['operationId'])
+        ) {
+            $originalOpId   = $op['operationId'];
+            $originalAmount = (int)($op['coinAmount'] ?? $info['original_coin_amount'] ?? 0);
+            break;
+        }
+    }
+
+    if (!$originalAmount) {
+        $originalAmount = (int)($info['original_coin_amount'] ?? 0);
+    }
+
+    if (!$hppOrderId) {
+        return '';
+    }
+
+    $adminStatusUrl = '../modules/gateways/alliancepay/admin_status.php'
+        . '?hppOrderId=' . urlencode($hppOrderId);
+
+    $opInfo = $originalOpId
+        ? ' | Operation: <code>' . htmlspecialchars($originalOpId) . '</code>'
+        : '';
+    $amountInfo = $originalAmount
+        ? ' | Сума: <strong>' . number_format($originalAmount / 100, 2) . '</strong>'
+        : '';
+
+    $html  = '<div class="alert alert-warning" style="margin-top:15px;padding:15px;border-radius:4px;">';
+    $html .= '<strong>AlliancePay PREAUTH</strong> — кошти зарезервовано, ще не списано.';
+    $html .= $opInfo . $amountInfo . '<br><br>';
+    $html .= '<a href="' . htmlspecialchars($adminStatusUrl) . '" target="_blank" '
+        . 'class="btn btn-success btn-sm">'
+        . 'Підтвердити списання (Completion)'
+        . '</a>';
+    $html .= '</div>';
+
+    return $html;
+});
+
 add_hook('ClientAreaPageViewInvoice', 1, function ($vars) {
 
     $invoiceId = isset($vars['invoiceid'])
@@ -58,7 +119,6 @@ add_hook('ClientAreaPageViewInvoice', 1, function ($vars) {
     $hasRecurringItems = Capsule::table('tblinvoiceitems as ii')
         ->where('ii.invoiceid', $invoiceId)
         ->where(function ($query) {
-            // Hosting services
             $query->orWhere(function ($subquery) {
                 $subquery->where('ii.type', 'Hosting')
                     ->whereExists(function ($subSubquery) {
@@ -69,7 +129,6 @@ add_hook('ClientAreaPageViewInvoice', 1, function ($vars) {
                     });
             });
 
-            // Hosting Addons
             $query->orWhere(function ($subquery) {
                 $subquery->where('ii.type', 'Addon')
                     ->whereExists(function ($subSubquery) {
@@ -80,7 +139,6 @@ add_hook('ClientAreaPageViewInvoice', 1, function ($vars) {
                     });
             });
 
-            // Domain Registrations (always recurring - annual renewal)
             $query->orWhere(function ($subquery) {
                 $subquery->whereIn('ii.type', ['Domain', 'DomainRegister', 'DomainTransfer']);
             });

@@ -64,16 +64,24 @@ function alliancepay_config($params)
             'Type' => 'dropdown',
             'Options' => [
                 AlliancePayHelper::HPP_PAY_TYPE_PURCHASE => AlliancePayHelper::HPP_PAY_TYPE_PURCHASE,
-                AlliancePayHelper::HPP_PAY_TYPE_A2A      => AlliancePayHelper::HPP_PAY_TYPE_A2A,
+                AlliancePayHelper::HPP_PAY_TYPE_A2A => AlliancePayHelper::HPP_PAY_TYPE_A2A,
+                AlliancePayHelper::HPP_PAY_TYPE_PREAUTH => AlliancePayHelper::HPP_PAY_TYPE_PREAUTH,
             ],
             'Default' => AlliancePayHelper::HPP_PAY_TYPE_PURCHASE,
+        ],
+        'preAuthExpDate' => [
+            'FriendlyName' => 'Pre-Auth Expiration Period',
+            'Type' => 'dropdown',
+            'Options' => implode(',', AlliancePayHelper::PREAUTH_EXP_DATE_OPTIONS),
+            'Default' => AlliancePayHelper::PREAUTH_EXP_DATE_DEFAULT,
+            'Description' => 'Термін дії pre-auth резервування (мін 2год, макс 28 днів). Застосовується лише при Payment Type = PREAUTH.',
         ],
         'statusPageType' => [
             'FriendlyName' => 'Status Page Type',
             'Type' => 'dropdown',
             'Options' => [
                 AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT => AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT,
-                AlliancePayHelper::STATUS_PAGE_TYPE_TIMER   => AlliancePayHelper::STATUS_PAGE_TYPE_TIMER,
+                AlliancePayHelper::STATUS_PAGE_TYPE_TIMER => AlliancePayHelper::STATUS_PAGE_TYPE_TIMER,
             ],
             'Default' => AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT,
         ],
@@ -115,7 +123,7 @@ function alliancepay_link($params)
                 $coinAmount = (int)round($amount * 100);
 
                 $callbackUrl = $params['systemurl']
-                    . '/modules/gateways/callback/alliancepay.php?invoiceid='
+                    . 'modules/gateways/callback/alliancepay.php?invoiceid='
                     . $params['invoiceid'];
 
                 $phone = '';
@@ -139,7 +147,9 @@ function alliancepay_link($params)
                     'coinAmount' => $coinAmount,
                     'directType' => AlliancePayHelper::DIRECT_TYPE_REDIRECT,
                     'paymentMethods' => AlliancePayHelper::HPP_PAYMENT_METHODS,
-                    'successUrl' => $params['returnurl'],
+                    'successUrl' => ($params['paymentType'] ?? '') === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH
+                        ? rtrim($params['systemurl'], '/') . '/viewinvoice.php?id=' . $params['invoiceid']
+                        : $params['returnurl'],
                     'failUrl' => $params['returnurl'],
                     'statusPageType' => $params['statusPageType'] ?? AlliancePayHelper::STATUS_PAGE_TYPE_DEFAULT,
                     'notificationUrl' => $callbackUrl,
@@ -164,6 +174,19 @@ function alliancepay_link($params)
                     $orderData['merchantComment'] = 'Payment for invoice #' . ($params['invoiceid'] ?? '');
                 }
 
+                if ($orderData['hppPayType'] === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH) {
+                    $expSeconds = AlliancePayHelper::getPreAuthExpSeconds(
+                        $params['preAuthExpDate'] ?? AlliancePayHelper::PREAUTH_EXP_DATE_DEFAULT
+                    );
+                    $expDt = (new DateTimeImmutable('now', new DateTimeZone('Europe/Kyiv')))
+                        ->modify('+' . ($expSeconds + 30) . ' seconds');
+                    $orderData['preAuthExpDate'] = preg_replace(
+                        '/\.(\d{2})\d+([+-])/',
+                        '.$1$2',
+                        $expDt->format('Y-m-d H:i:s.vP')
+                    );
+                }
+
                 if (!empty($countryCode)) {
                     $orderData['customerData']['senderCountry'] = $countryCode;
                 }
@@ -172,6 +195,16 @@ function alliancepay_link($params)
                 $orderService = new CreateOrder();
 
                 $response = $orderService->createOrder($orderRequest, $authDto);
+
+                if (($orderData['hppPayType'] ?? '') === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH) {
+                    AlliancePayHelper::savePreAuthOrderData(
+                        invoiceId: (int)$params['invoiceid'],
+                        hppOrderId: $response->getHppOrderId(),
+                        merchantRequestId: $merchantRequestId,
+                        coinAmount: $coinAmount,
+                        gatewayModuleName: AlliancePayHelper::GATEWAY_MODULE_NAME,
+                    );
+                }
 
                 logTransaction(
                     $params['name'],
@@ -220,6 +253,14 @@ function alliancepay_link($params)
                 return '<div class="alert alert-danger">Payment gateway error. Please contact support.</div>';
             }
         }
+    }
+
+    $existingPreAuth = AlliancePayHelper::getPreAuthPendingRecord((int)$params['invoiceid']);
+    if ($existingPreAuth) {
+        return '<div class="alert alert-warning" style="margin: 10px 0;">'
+            . '<strong>AlliancePay:</strong> '
+            . 'Кошти зарезервовано та очікують підтвердження адміністратора.'
+            . '</div>';
     }
 
     $htmlOutput = '<form method="post" action="viewinvoice.php?id=' . $params['invoiceid'] . '">';
