@@ -22,6 +22,7 @@ use AlliancePay\Sdk\Payment\Dto\Refund\RefundRequestDTO;
 use AlliancePay\Sdk\Services\DateTime\DateTimeImmutableProvider;
 use AlliancePay\AlliancePayHelper;
 use AlliancePay\Sdk\Exceptions\AuthenticationException;
+use AlliancePay\Sdk\Traits\CoinAmountConverter;
 
 function alliancepay_MetaData()
 {
@@ -29,12 +30,14 @@ function alliancepay_MetaData()
         'DisplayName' => 'AlliancePay',
         'APIVersion' => '1.1',
         'TokenisedStorage' => false,
-        'GatewayType' => 'Bank'
+        'gatewayType' => 'Bank',
     ];
 }
 
 function alliancepay_config($params)
 {
+    AlliancePayHelper::ensureTablesExist();
+
     $gatewaySettings = [];
     try {
         $settings = Capsule::table('tblpaymentgateways')
@@ -51,7 +54,28 @@ function alliancepay_config($params)
 
     $authData = AlliancePayHelper::getAuthorizationDataHtml($merchantId);
 
-    return [
+    $currentPaymentType = $gatewaySettings['paymentType'] ?? AlliancePayHelper::HPP_PAY_TYPE_PURCHASE;
+    $currentConvertTo   = $gatewaySettings['convertto'] ?? '';
+
+    $a2aWarningHtml = '';
+    if ($currentPaymentType === AlliancePayHelper::HPP_PAY_TYPE_A2A) {
+        try {
+            $uahCurrencyId = Capsule::table('tblcurrencies')->where('code', 'UAH')->value('id');
+            if ((string)$currentConvertTo !== (string)$uahCurrencyId) {
+                $a2aWarningHtml = '<div style="padding:12px 15px; background:#fff3cd; border:1px solid #ffc107;'
+                    . ' border-radius:4px; color:#856404; max-width:600px;">'
+                    . '<strong>&#9888; Увага!</strong> Payment Type встановлено <strong>A2A</strong>, '
+                    . 'але <strong>Convert To For Processing</strong> не встановлено в <strong>UAH</strong>.<br>'
+                    . 'A2A підтримує тільки UAH. Будь ласка, встановіть '
+                    . '<strong>Convert To For Processing &rarr; UAH</strong> у налаштуваннях цього gateway.'
+                    . '</div>';
+            }
+        } catch (Exception $e) {
+            logModuleCall(AlliancePayHelper::GATEWAY_MODULE_NAME, 'Config A2A Warning Error', [], $e->getMessage());
+        }
+    }
+
+    $config = [
         'FriendlyName' => ['Type' => 'System', 'Value' => 'AlliancePay Bank'],
         'baseUrl' => [
             'FriendlyName' => 'API Base URL',
@@ -99,6 +123,16 @@ function alliancepay_config($params)
             'Value' => $authData,
         ]
     ];
+
+    if ($a2aWarningHtml !== '') {
+        $config['A2AWarning'] = [
+            'FriendlyName' => 'A2A Warning',
+            'Type' => 'System',
+            'Value' => $a2aWarningHtml,
+        ];
+    }
+
+    return $config;
 }
 
 function alliancepay_link($params)
@@ -111,6 +145,9 @@ function alliancepay_link($params)
 
         $amount = $params['amount'];
         $currency = $params['currency'];
+
+        $currencyCode = CoinAmountConverter::currencyCodeFromAlpha($currency)
+            ?? OrderRequestDTO::CURRENCY_UAH;
 
         while ($attempt <= $maxAttempts) {
             try {
@@ -140,14 +177,21 @@ function alliancepay_link($params)
                     $countryCode = $countryData['numeric'] ?? '';
                 }
 
+                $hppPayType = $params['paymentType'] ?? AlliancePayHelper::HPP_PAY_TYPE_PURCHASE;
+
+                $effectiveCurrencyCode = ($hppPayType === AlliancePayHelper::HPP_PAY_TYPE_A2A)
+                    ? OrderRequestDTO::CURRENCY_UAH
+                    : $currencyCode;
+
                 $orderData = [
                     'merchantRequestId' => $merchantRequestId,
                     'merchantId' => $authDto->getMerchantId(),
-                    'hppPayType' => $params['paymentType'] ?? AlliancePayHelper::HPP_PAY_TYPE_PURCHASE,
+                    'hppPayType' => $hppPayType,
                     'coinAmount' => $coinAmount,
+                    'currencyCode' => $effectiveCurrencyCode,
                     'directType' => AlliancePayHelper::DIRECT_TYPE_REDIRECT,
                     'paymentMethods' => AlliancePayHelper::HPP_PAYMENT_METHODS,
-                    'successUrl' => ($params['paymentType'] ?? '') === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH
+                    'successUrl' => $hppPayType === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH
                         ? rtrim($params['systemurl'], '/') . '/viewinvoice.php?id=' . $params['invoiceid']
                         : $params['returnurl'],
                     'failUrl' => $params['returnurl'],
@@ -168,13 +212,13 @@ function alliancepay_link($params)
                     ],
                 ];
 
-                if ($orderData['hppPayType'] === AlliancePayHelper::HPP_PAY_TYPE_A2A) {
+                if ($hppPayType === AlliancePayHelper::HPP_PAY_TYPE_A2A) {
                     $orderData['directType'] = AlliancePayHelper::DIRECT_TYPE_BANK_LINK;
                     $orderData['priorityBankCode'] = AlliancePayHelper::A2A_PRIORITY_BANK_CODE;
                     $orderData['merchantComment'] = 'Payment for invoice #' . ($params['invoiceid'] ?? '');
                 }
 
-                if ($orderData['hppPayType'] === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH) {
+                if ($hppPayType === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH) {
                     $expSeconds = AlliancePayHelper::getPreAuthExpSeconds(
                         $params['preAuthExpDate'] ?? AlliancePayHelper::PREAUTH_EXP_DATE_DEFAULT
                     );
@@ -196,7 +240,29 @@ function alliancepay_link($params)
 
                 $response = $orderService->createOrder($orderRequest, $authDto);
 
-                if (($orderData['hppPayType'] ?? '') === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH) {
+                $expiredOrderDate = $response->getExpiredOrderDate()
+                    ? $response->getExpiredOrderDate()->format('Y-m-d H:i:s')
+                    : date('Y-m-d H:i:s', strtotime('+24 hours'));
+
+                $createDate = $response->getCreateDate()
+                    ? $response->getCreateDate()->format('Y-m-d H:i:s')
+                    : date('Y-m-d H:i:s');
+
+                AlliancePayHelper::saveCheckoutOrder(
+                    orderId: (int)$params['invoiceid'],
+                    merchantRequestId: $merchantRequestId,
+                    hppOrderId: $response->getHppOrderId(),
+                    merchantId: $authDto->getMerchantId(),
+                    coinAmount: $coinAmount,
+                    hppPayType: $hppPayType,
+                    orderStatus: $response->getOrderStatus(),
+                    paymentMethods: $response->getPaymentMethods(),
+                    createDate: $createDate,
+                    expiredOrderDate: $expiredOrderDate,
+                    currencyCode: $effectiveCurrencyCode,
+                );
+
+                if ($hppPayType === AlliancePayHelper::HPP_PAY_TYPE_PREAUTH) {
                     AlliancePayHelper::savePreAuthOrderData(
                         invoiceId: (int)$params['invoiceid'],
                         hppOrderId: $response->getHppOrderId(),
@@ -293,6 +359,17 @@ function alliancepay_refund($params)
     $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
     $attempt = 1;
     $authDto = null;
+    $checkoutOrder = AlliancePayHelper::getCheckoutOrderByInvoice((int)$params['invoiceid']);
+    $savedCurrencyCode = $checkoutOrder ? (int)$checkoutOrder->currency_code : OrderRequestDTO::CURRENCY_UAH;
+    $conversionRate    = $checkoutOrder ? (float)$checkoutOrder->conversion_rate : null;
+
+    if ($savedCurrencyCode !== OrderRequestDTO::CURRENCY_UAH && $conversionRate) {
+        $refundCoinAmount = CoinAmountConverter::convertToUahCoins(
+            (float)$params['amount'], $conversionRate
+        );
+    } else {
+        $refundCoinAmount = (int)round($params['amount'] * 100);
+    }
 
     while ($attempt <= $maxAttempts) {
         try {
@@ -300,13 +377,14 @@ function alliancepay_refund($params)
                 $authDto = AlliancePayHelper::getAuthDto($params);
             }
 
-            $operationId = $params['transid'];
+            $operationId      = $params['transid'];
+            $refundMerchantId = GenerateRequestIdentification::generateRequestId();
 
             $refundData = [
-                'merchantRequestId' => GenerateRequestIdentification::generateRequestId(),
+                'merchantRequestId' => $refundMerchantId,
                 'merchantId' => $authDto->getMerchantId(),
                 'operationId' => $operationId,
-                'coinAmount' => (int)round($params['amount'] * 100),
+                'coinAmount' => $refundCoinAmount,
                 'date' => DateTimeImmutableProvider::fromString(
                     'now',
                     DateTimeImmutableProvider::KYIV_TIMEZONE
@@ -320,10 +398,16 @@ function alliancepay_refund($params)
 
             logModuleCall(AlliancePayHelper::GATEWAY_MODULE_NAME, "Refund Success (Attempt $attempt)", $refundData, $result);
 
+            AlliancePayHelper::saveRefundOrder(
+                orderId: (int)$params['invoiceid'],
+                refundData: $result->toArray(),
+                merchantRequestId: $refundMerchantId,
+            );
+
             return [
                 'status' => 'success',
                 'rawdata' => 'Refund successful',
-                'transid' => $result->getOperationId() ?? $refundData['merchantRequestId'],
+                'transid' => $result->getOperationId() ?? $refundMerchantId,
             ];
 
         } catch (Exception $e) {

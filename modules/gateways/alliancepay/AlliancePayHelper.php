@@ -11,6 +11,7 @@ use AlliancePay\Sdk\Exceptions\AuthenticationException;
 use AlliancePay\Sdk\Services\Authorization\AuthorizationService;
 use AlliancePay\Sdk\Services\Authorization\Dto\AuthorizationDTO;
 use DateTimeImmutable;
+use Exception;
 use WHMCS\Database\Capsule;
 
 /**
@@ -422,6 +423,98 @@ class AlliancePayHelper
     }
 
     /**
+     * @return void
+     */
+    public static function ensureTablesExist(): void
+    {
+        $flag = Capsule::table('tblconfiguration')
+            ->where('setting', 'alliancepay_tables_created')
+            ->value('value');
+
+        if ($flag === '1') {
+            return;
+        }
+
+        Capsule::statement("
+            CREATE TABLE IF NOT EXISTS `alliance_checkout_integration_order` (
+                `entity_id`                   INT UNSIGNED    NOT NULL AUTO_INCREMENT COMMENT 'Entity ID',
+                `order_id`                    INT             NOT NULL                COMMENT 'Order ID',
+                `merchant_request_id`         VARCHAR(255)    NOT NULL                COMMENT 'Merchant Request ID',
+                `hpp_order_id`                VARCHAR(255)    NOT NULL                COMMENT 'HPP Order ID',
+                `merchant_id`                 VARCHAR(255)    NOT NULL                COMMENT 'Merchant ID',
+                `coin_amount`                 INT             NOT NULL                COMMENT 'Coin Amount',
+                `hpp_pay_type`                VARCHAR(50)     NOT NULL                COMMENT 'HPP Pay Type',
+                `order_status`                VARCHAR(50)     NOT NULL                COMMENT 'Order Status',
+                `payment_methods`             TEXT            NOT NULL                COMMENT 'Payment Methods',
+                `create_date`                 DATETIME        NOT NULL                COMMENT 'Create Date',
+                `updated_at`                  DATETIME        NULL                    COMMENT 'Updated At',
+                `operation_id`                VARCHAR(255)    NULL                    COMMENT 'Operation ID',
+                `transaction_type`            SMALLINT UNSIGNED NULL                  COMMENT 'transactionType',
+                `ecom_order_id`               VARCHAR(255)    NULL                    COMMENT 'Ecom Order ID',
+                `is_callback_returned`        TINYINT(1)      NOT NULL DEFAULT 0      COMMENT 'Is Callback Returned',
+                `callback_data`               TEXT            NULL                    COMMENT 'Callback Data',
+                `expired_order_date`          DATETIME        NOT NULL                COMMENT 'Expired Order Date',
+                `original_authorized_amount`  INT UNSIGNED    NULL                    COMMENT 'Original Authorized Amount in coins (for PREAUTH)',
+                `currency_code`               SMALLINT UNSIGNED NULL                  COMMENT 'Currency ISO 4217 numeric code (980=UAH, 840=USD, 978=EUR)',
+                `conversion_rate`             DECIMAL(15,6)   NULL                    COMMENT 'Currency conversion rate to UAH from PREAUTH callback',
+                PRIMARY KEY (`entity_id`),
+                INDEX `idx_merchant_request_id` (`merchant_request_id`) USING BTREE,
+                INDEX `idx_hpp_order_id`         (`hpp_order_id`)        USING BTREE,
+                INDEX `idx_merchant_id`          (`merchant_id`)         USING BTREE,
+                INDEX `idx_order_id`             (`order_id`)            USING BTREE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Alliance Checkout Integration Order Table'
+        ");
+
+        Capsule::statement("
+            CREATE TABLE IF NOT EXISTS `alliance_integration_order_refund` (
+                `refund_id`                   INT             NOT NULL AUTO_INCREMENT COMMENT 'Refund ID',
+                `order_id`                    INT             NOT NULL                COMMENT 'Order ID',
+                `type`                        VARCHAR(255)    NOT NULL                COMMENT 'Type',
+                `rrn`                         VARCHAR(255)    NOT NULL                COMMENT 'RRN',
+                `purpose`                     VARCHAR(255)    NOT NULL                COMMENT 'Purpose',
+                `comment`                     VARCHAR(255)    NOT NULL                COMMENT 'Comment',
+                `coin_amount`                 INT             NOT NULL                COMMENT 'Coin Amount',
+                `merchant_id`                 VARCHAR(255)    NOT NULL                COMMENT 'Merchant ID',
+                `operation_id`                VARCHAR(255)    NOT NULL                COMMENT 'Operation ID',
+                `ecom_operation_id`           VARCHAR(255)    NOT NULL                COMMENT 'Ecom Operation ID',
+                `merchant_name`               VARCHAR(255)    NULL                    COMMENT 'Merchant Name',
+                `approval_code`               VARCHAR(255)    NOT NULL                COMMENT 'Approval Code',
+                `status`                      VARCHAR(255)    NOT NULL                COMMENT 'Status',
+                `transaction_type`            INT             NOT NULL                COMMENT 'Transaction Type',
+                `merchant_request_id`         VARCHAR(255)    NOT NULL                COMMENT 'Merchant Request ID',
+                `transaction_currency`        VARCHAR(255)    NOT NULL                COMMENT 'Transaction Currency',
+                `merchant_commission`         INT             NULL                    COMMENT 'Merchant Commission',
+                `create_date_time`            DATETIME        NOT NULL                COMMENT 'Create Date Time',
+                `modification_date_time`      DATETIME        NOT NULL                COMMENT 'Modification Date Time',
+                `action_code`                 VARCHAR(255)    NOT NULL                COMMENT 'Action Code',
+                `response_code`               VARCHAR(255)    NOT NULL                COMMENT 'Response Code',
+                `description`                 VARCHAR(255)    NOT NULL                COMMENT 'Description',
+                `processing_merchant_id`      VARCHAR(255)    NOT NULL                COMMENT 'Processing Merchant ID',
+                `processing_terminal_id`      VARCHAR(255)    NOT NULL                COMMENT 'Processing Terminal ID',
+                `transaction_response_info`   TEXT            NOT NULL                COMMENT 'Transaction Response Info',
+                `bank_code`                   VARCHAR(255)    NOT NULL                COMMENT 'Bank Code',
+                `payment_system`              VARCHAR(255)    NOT NULL                COMMENT 'Payment System',
+                `product_type`                VARCHAR(255)    NOT NULL                COMMENT 'Product Type',
+                `notification_url`            VARCHAR(255)    NOT NULL                COMMENT 'Notification URL',
+                `payment_service_type`        VARCHAR(255)    NOT NULL                COMMENT 'Payment Service Type',
+                `notification_encryption`     VARCHAR(255)    NOT NULL                COMMENT 'Notification Encryption',
+                `original_operation_id`       VARCHAR(255)    NOT NULL                COMMENT 'Original Operation ID',
+                `original_coin_amount`        INT             NOT NULL                COMMENT 'Original Coin Amount',
+                `original_ecom_operation_id`  VARCHAR(255)    NOT NULL                COMMENT 'Original Ecom Operation ID',
+                `rrn_original`                VARCHAR(255)    NOT NULL                COMMENT 'RRN Original',
+                PRIMARY KEY (`refund_id`),
+                INDEX `idx_merchant_request_id` (`merchant_request_id`) USING BTREE,
+                INDEX `idx_merchant_id`          (`merchant_id`)         USING BTREE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Alliance Integration Order Refund Table'
+        ");
+
+        Capsule::table('tblconfiguration')->updateOrInsert(
+            ['setting' => 'alliancepay_tables_created'],
+            ['value' => '1']
+        );
+    }
+
+    /**
      * @param AuthorizationDTO $authData
      * @param string $cacheKey
      * @return void
@@ -434,5 +527,211 @@ class AlliancePayHelper
             ['setting' => $cacheKey],
             ['value' => $jsonToSave]
         );
+    }
+
+    /**
+     * @param int $orderId
+     * @param string $merchantRequestId
+     * @param string $hppOrderId
+     * @param string $merchantId
+     * @param int $coinAmount
+     * @param string $hppPayType
+     * @param string $orderStatus
+     * @param array $paymentMethods
+     * @param string $createDate
+     * @param string $expiredOrderDate
+     * @param int $currencyCode
+     * @return void
+     */
+    public static function saveCheckoutOrder(
+        int    $orderId,
+        string $merchantRequestId,
+        string $hppOrderId,
+        string $merchantId,
+        int    $coinAmount,
+        string $hppPayType,
+        string $orderStatus,
+        array  $paymentMethods,
+        string $createDate,
+        string $expiredOrderDate,
+        int    $currencyCode
+    ): void
+    {
+        $existing = Capsule::table('alliance_checkout_integration_order')
+            ->where('hpp_order_id', $hppOrderId)
+            ->first();
+
+        if ($existing) {
+            return;
+        }
+
+        Capsule::table('alliance_checkout_integration_order')->insert([
+            'order_id' => $orderId,
+            'merchant_request_id' => $merchantRequestId,
+            'hpp_order_id' => $hppOrderId,
+            'merchant_id' => $merchantId,
+            'coin_amount' => $coinAmount,
+            'hpp_pay_type' => $hppPayType,
+            'order_status' => $orderStatus,
+            'payment_methods' => json_encode($paymentMethods, JSON_UNESCAPED_UNICODE),
+            'create_date' => $createDate,
+            'expired_order_date' => $expiredOrderDate,
+            'currency_code' => $currencyCode,
+            'is_callback_returned' => 0,
+        ]);
+    }
+
+    /**
+     * @param string $hppOrderId
+     * @param string $orderStatus
+     * @param string|null $operationId
+     * @param int|null $transactionType
+     * @param string|null $ecomOrderId
+     * @param array $callbackData
+     * @param int|null $originalAuthorizedAmount
+     * @param float|null $conversionRate
+     * @return void
+     */
+    public static function updateCheckoutOrderOnCallback(
+        string  $hppOrderId,
+        string  $orderStatus,
+        ?string $operationId,
+        ?int    $transactionType,
+        ?string $ecomOrderId,
+        array   $callbackData,
+        ?int    $originalAuthorizedAmount,
+        ?float  $conversionRate
+    ): void
+    {
+        $existingJson = Capsule::table('alliance_checkout_integration_order')
+            ->where('hpp_order_id', $hppOrderId)
+            ->value('callback_data');
+
+        $stored = $existingJson ? (json_decode($existingJson, true) ?? []) : [];
+        $operations = $stored['operations'] ?? [];
+
+        $incomingOperation = $callbackData['operation'] ?? null;
+        if (is_array($incomingOperation) && !empty($incomingOperation['operationId'])) {
+            $alreadyStored = false;
+            foreach ($operations as $op) {
+                if (($op['operationId'] ?? null) === $incomingOperation['operationId']) {
+                    $alreadyStored = true;
+                    break;
+                }
+            }
+            if (!$alreadyStored) {
+                $operations[] = $incomingOperation;
+            }
+        }
+
+        $callbackDataToStore = $callbackData;
+        unset($callbackDataToStore['operation']);
+        $callbackDataToStore['operations'] = $operations;
+
+        $update = [
+            'order_status' => $orderStatus,
+            'is_callback_returned' => 1,
+            'callback_data' => json_encode($callbackDataToStore, JSON_UNESCAPED_UNICODE),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+
+        if ($operationId !== null) {
+            $update['operation_id'] = $operationId;
+        }
+        if ($transactionType !== null) {
+            $update['transaction_type'] = $transactionType;
+        }
+        if ($ecomOrderId !== null) {
+            $update['ecom_order_id'] = $ecomOrderId;
+        }
+        if ($originalAuthorizedAmount !== null) {
+            $update['original_authorized_amount'] = $originalAuthorizedAmount;
+        }
+        if ($conversionRate !== null) {
+            $update['conversion_rate'] = $conversionRate;
+        }
+
+        Capsule::table('alliance_checkout_integration_order')
+            ->where('hpp_order_id', $hppOrderId)
+            ->update($update);
+    }
+
+    /**
+     * @param int $orderId
+     * @return object|null
+     */
+    public static function getCheckoutOrderByInvoice(int $orderId): ?object
+    {
+        return Capsule::table('alliance_checkout_integration_order')
+            ->where('order_id', $orderId)
+            ->orderBy('entity_id', 'desc')
+            ->first();
+    }
+
+    /**
+     * @param int $orderId
+     * @param array $refundData
+     * @param string $merchantRequestId
+     * @return void
+     * @throws Exception
+     */
+    public static function saveRefundOrder(
+        int    $orderId,
+        array  $refundData,
+        string $merchantRequestId
+    ): void
+    {
+        $toDatetime = static function (?string $value): string {
+            if (empty($value)) {
+                return date('Y-m-d H:i:s');
+            }
+            try {
+                return (new DateTimeImmutable($value))->format('Y-m-d H:i:s');
+            } catch (Exception $e) {
+                return date('Y-m-d H:i:s');
+            }
+        };
+
+        Capsule::table('alliance_integration_order_refund')->insert([
+            'order_id' => $orderId,
+            'type' => $refundData['type'] ?? '',
+            'rrn' => $refundData['rrn'] ?? '',
+            'purpose' => 'Refund for invoice #' . $orderId,
+            'comment' => '',
+            'coin_amount' => (int)($refundData['coinAmount'] ?? 0),
+            'merchant_id' => $refundData['merchantId'] ?? '',
+            'operation_id' => $refundData['operationId'] ?? '',
+            'ecom_operation_id' => $refundData['ecomOperationId'] ?? '',
+            'merchant_name' => $refundData['merchantName'] ?? null,
+            'approval_code' => $refundData['approvalCode'] ?? '',
+            'status' => $refundData['status'] ?? '',
+            'transaction_type' => (int)($refundData['transactionType'] ?? 0),
+            'merchant_request_id' => $merchantRequestId,
+            'transaction_currency' => $refundData['transactionCurrency'] ?? '',
+            'merchant_commission' => isset($refundData['merchantCommission'])
+                ? (int)round((float)$refundData['merchantCommission'])
+                : null,
+            'create_date_time' => $toDatetime($refundData['creationDateTime'] ?? null),
+            'modification_date_time' => $toDatetime($refundData['modificationDateTime'] ?? null),
+            'action_code' => '',
+            'response_code' => '',
+            'description' => '',
+            'processing_merchant_id' => $refundData['processingMerchantId'] ?? '',
+            'processing_terminal_id' => $refundData['processingTerminalId'] ?? '',
+            'transaction_response_info' => json_encode(
+                $refundData['transactionResponseInfo'] ?? [],
+                JSON_UNESCAPED_UNICODE
+            ),
+            'bank_code' => $refundData['bankCode'] ?? '',
+            'payment_system' => $refundData['paymentSystem'] ?? '',
+            'product_type' => $refundData['productType'] ?? '',
+            'notification_url' => $refundData['notificationUrl'] ?? '',
+            'payment_service_type' => $refundData['paymentServiceType'] ?? '',
+            'notification_encryption' => $refundData['notificationEncryption'] ? '1' : '0',
+            'original_operation_id' => $refundData['originalOperationId'] ?? '',
+            'original_coin_amount' => (int)($refundData['originalCoinAmount'] ?? 0),
+            'original_ecom_operation_id' => $refundData['originalEcomOperationId'] ?? '',
+            'rrn_original' => $refundData['rrnOriginal'] ?? '',
+        ]);
     }
 }

@@ -151,6 +151,31 @@ try {
         ),
     );
 
+    $isConversionType = in_array($operationType, [
+        AlliancePayHelper::OPERATION_TYPE_PURCHASE,
+        AlliancePayHelper::OPERATION_TYPE_PREAUTH,
+    ], true);
+
+    AlliancePayHelper::updateCheckoutOrderOnCallback(
+        hppOrderId: $hppOrderId,
+        orderStatus: $orderStatus,
+        operationId: $operationId ?: null,
+        transactionType: isset($operationArray['transactionType'])
+            ? (int)$operationArray['transactionType']
+            : null,
+        ecomOrderId: $callbackData['ecomOrderId'] ?? null,
+        callbackData: $payload,
+        originalAuthorizedAmount: (
+            $operationType === AlliancePayHelper::OPERATION_TYPE_PREAUTH
+            && $operationStatus === AlliancePayHelper::STATUS_SUCCESS
+        )
+            ? (int)($operationArray['coinAmount'] ?? 0)
+            : null,
+        conversionRate: ($isConversionType && isset($operationArray['conversionRate']))
+            ? (float)$operationArray['conversionRate']
+            : null,
+    );
+
     http_response_code(200);
     echo 'OK';
 

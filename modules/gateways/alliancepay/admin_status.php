@@ -95,7 +95,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'compl
                             $compAuthDto = AlliancePayHelper::getAuthDto($compGatewayParams);
                         }
 
-                        $date = DateTimeImmutableProvider::nowByTimezone(DateTimeImmutableProvider::KYIV_TIMEZONE);
+                        $date = DateTimeImmutableProvider::nowByTimezone(
+                                DateTimeImmutableProvider::KYIV_TIMEZONE
+                        )->format('Y-m-d H:i:s');
 
                         $completionData = OrderRequestCompletionDTO::fromArray([
                                 'merchantRequestId' => GenerateRequestIdentification::generateRequestId(),
