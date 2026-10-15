@@ -17,7 +17,6 @@ use AlliancePay\Sdk\Payment\Dto\Order\OrderRequestCompletionDTO;
 use AlliancePay\Sdk\Services\RequestIdentification\GenerateRequestIdentification;
 use AlliancePay\Sdk\Services\DateTime\DateTimeImmutableProvider;
 use AlliancePay\AlliancePayHelper;
-use AlliancePay\Sdk\Exceptions\AuthenticationException;
 
 $currentUser = new CurrentUser();
 if (!$currentUser->isAuthenticatedAdmin()) {
@@ -80,82 +79,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'compl
                         . '/modules/gateways/callback/alliancepay.php?invoiceid='
                         . $postInvoiceId;
 
-                $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
-                $attempt = 1;
-                $compAuthDto = null;
+                try {
+                    $compGatewayParams['authenticationKey'] = html_entity_decode(
+                            $compGatewayParams['authenticationKey'],
+                            ENT_QUOTES,
+                            'UTF-8'
+                    );
+                    $compAuthDto = AlliancePayHelper::getAuthDto($compGatewayParams);
 
-                while ($attempt <= $maxAttempts) {
-                    try {
-                        if (!$compAuthDto) {
-                            $compGatewayParams['authenticationKey'] = html_entity_decode(
-                                    $compGatewayParams['authenticationKey'],
-                                    ENT_QUOTES,
-                                    'UTF-8'
-                            );
-                            $compAuthDto = AlliancePayHelper::getAuthDto($compGatewayParams);
-                        }
+                    $date = DateTimeImmutableProvider::nowByTimezone(
+                            DateTimeImmutableProvider::KYIV_TIMEZONE
+                    )->format('Y-m-d H:i:s');
 
-                        $date = DateTimeImmutableProvider::nowByTimezone(
-                                DateTimeImmutableProvider::KYIV_TIMEZONE
-                        )->format('Y-m-d H:i:s');
+                    $completionData = OrderRequestCompletionDTO::fromArray([
+                            'merchantRequestId' => GenerateRequestIdentification::generateRequestId(),
+                            'merchantId' => $compAuthDto->getMerchantId(),
+                            'originalOperationId' => $originalOpId,
+                            'coinAmount' => $originalAmount,
+                            'date' => $date,
+                            'notificationUrl' => $callbackUrl,
+                    ]);
 
-                        $completionData = OrderRequestCompletionDTO::fromArray([
-                                'merchantRequestId' => GenerateRequestIdentification::generateRequestId(),
-                                'merchantId' => $compAuthDto->getMerchantId(),
-                                'originalOperationId' => $originalOpId,
-                                'coinAmount' => $originalAmount,
-                                'date' => $date,
-                                'notificationUrl' => $callbackUrl,
-                        ]);
+                    $completionService = new CreateOrderCompletion();
+                    $completionResult = $completionService->createCompletion(
+                            $completionData,
+                            $compAuthDto,
+                            $originalAmount
+                    );
 
-                        $completionService = new CreateOrderCompletion();
-                        $completionResult = $completionService->createCompletion(
-                                $completionData,
-                                $compAuthDto,
-                                $originalAmount
-                        );
+                    logModuleCall(
+                            AlliancePayHelper::GATEWAY_MODULE_NAME,
+                            'PreAuth Completion Success (Admin)',
+                            [
+                                    'invoiceId' => $postInvoiceId,
+                                    'originalOperationId' => $originalOpId,
+                                    'coinAmount' => $originalAmount,
+                            ],
+                            $completionResult->toArray()
+                    );
 
-                        logModuleCall(
-                                AlliancePayHelper::GATEWAY_MODULE_NAME,
-                                'PreAuth Completion Success (Admin)',
-                                [
-                                        'invoiceId' => $postInvoiceId,
-                                        'originalOperationId' => $originalOpId,
-                                        'coinAmount' => $originalAmount,
-                                ],
-                                $completionResult->toArray()
-                        );
+                    header('Location: ?hppOrderId=' . urlencode($hppOrderId) . '&completed=1');
+                    exit;
 
-                        header('Location: ?hppOrderId=' . urlencode($hppOrderId) . '&completed=1');
-                        exit;
+                } catch (Exception $e) {
+                    $exMsg = $e->getMessage();
 
-                    } catch (Exception $e) {
-                        $exMsg = $e->getMessage();
-                        $isAuthError = $e->getPrevious() instanceof AuthenticationException
-                                || $e instanceof AuthenticationException
-                                || strpos($exMsg, '401') !== false
-                                || strpos($exMsg, 'b_used_token') !== false
-                                || strpos($exMsg, 'b_auth_token_expired') !== false;
-
-                        if ($isAuthError && $attempt < $maxAttempts) {
-                            $compAuthDto = AlliancePayHelper::forceReauthorize($compGatewayParams);
-                            $attempt++;
-                            continue;
-                        }
-
-                        $completionError = 'Помилка Completion API: ' . $exMsg;
-                        logModuleCall(
-                                AlliancePayHelper::GATEWAY_MODULE_NAME,
-                                'PreAuth Completion Error (Admin)',
-                                [
-                                        'invoiceId' => $postInvoiceId,
-                                        'originalOpId' => $originalOpId,
-                                        $completionData->toArray()
-                                ],
-                                $exMsg
-                        );
-                        break;
-                    }
+                    $completionError = 'Помилка Completion API: ' . $exMsg;
+                    logModuleCall(
+                            AlliancePayHelper::GATEWAY_MODULE_NAME,
+                            'PreAuth Completion Error (Admin)',
+                            [
+                                    'invoiceId' => $postInvoiceId,
+                                    'originalOpId' => $originalOpId,
+                                    $completionData->toArray()
+                            ],
+                            $exMsg
+                    );
                 }
             }
         }
@@ -170,43 +149,20 @@ if (empty($hppOrderId)) {
     if (!$gatewayParams['type']) {
         $errorMsg = 'Платіжний модуль AlliancePay не активовано.';
     } else {
-        $maxAttempts = AlliancePayHelper::MAX_AUTH_RETRY_ATTEMPTS;
-        $attempt = 1;
-        $authDto = null;
+        try {
+            $gatewayParams['authenticationKey'] = html_entity_decode(
+                    $gatewayParams['authenticationKey'],
+                    ENT_QUOTES,
+                    'UTF-8'
+            );
+            $authDto = AlliancePayHelper::getAuthDto($gatewayParams);
 
-        while ($attempt <= $maxAttempts) {
-            try {
-                if (!$authDto) {
-                    $gatewayParams['authenticationKey'] = html_entity_decode(
-                            $gatewayParams['authenticationKey'],
-                            ENT_QUOTES,
-                            'UTF-8'
-                    );
-                    $authDto = AlliancePayHelper::getAuthDto($gatewayParams);
-                }
+            $checkService = new CheckOrderData();
+            $orderStatus = $checkService->checkOrderData($hppOrderId, $authDto);
+            $amount = $orderStatus->getCoinAmount() !== null ? ($orderStatus->getCoinAmount() / 100) : 0;
 
-                $checkService = new CheckOrderData();
-                $orderStatus = $checkService->checkOrderData($hppOrderId, $authDto);
-                $amount = $orderStatus->getCoinAmount() !== null ? ($orderStatus->getCoinAmount() / 100) : 0;
-                break;
-
-            } catch (\Exception $e) {
-                $exceptionMsg = $e->getMessage();
-                $isAuthError = $e instanceof AuthenticationException
-                    || $e->getPrevious() instanceof AuthenticationException
-                    || strpos($exceptionMsg, '401') !== false
-                    || strpos($exceptionMsg, 'b_used_token') !== false
-                    || strpos($exceptionMsg, 'b_auth_token_expired') !== false;
-
-                if ($isAuthError && $attempt < $maxAttempts) {
-                    $authDto = AlliancePayHelper::forceReauthorize($gatewayParams);
-                    $attempt++;
-                    continue;
-                }
-
-                $errorMsg = 'Помилка API при перевірці статусу: ' . $exceptionMsg;
-                break;
-            }
+        } catch (\Exception $e) {
+            $errorMsg = 'Помилка API при перевірці статусу: ' . $e->getMessage();
         }
     }
 }

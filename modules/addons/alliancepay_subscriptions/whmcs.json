@@ -1,0 +1,12 @@
+{
+    "schema": "1.0.0",
+    "type": "whmcs-addons",
+    "name": "alliancepay_subscriptions",
+    "license": "MIT",
+    "category": "payments",
+    "description": {
+        "name": "AlliancePay Subscriptions",
+        "tagline": "Керування планами підписок та рекурентними платежами AlliancePay."
+    },
+    "authors": [{"name": "Alliance Dgtl"}]
+}

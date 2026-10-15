@@ -12,7 +12,11 @@ require_once __DIR__ . '/../alliancepay/vendor/autoload.php';
 require_once __DIR__ . '/../alliancepay/AlliancePayHelper.php';
 
 use AlliancePay\AlliancePayHelper;
+use AlliancePay\Sdk\Exceptions\CallbackException;
 use AlliancePay\Sdk\Payment\Callback\CallbackHandler;
+use AlliancePay\Sdk\Services\Clients\HttpClientFactory;
+use AlliancePay\Sdk\Services\Jws\BankPublicKeyProvider;
+use AlliancePay\Sdk\Services\Jws\JwsVerificationService;
 use WHMCS\Database\Capsule;
 
 $gatewayModuleName = AlliancePayHelper::GATEWAY_MODULE_NAME;
@@ -21,13 +25,7 @@ if (!$gatewayParams['type']) {
     die("Module Not Activated");
 }
 
-$bodyJson = file_get_contents('php://input');
-$payload = json_decode($bodyJson, true);
-
-if (!$payload) {
-    http_response_code(400);
-    exit('Invalid JSON');
-}
+$bodyRaw = file_get_contents('php://input');
 
 $invoiceId = $_GET['invoiceid'] ?? null;
 
@@ -39,11 +37,40 @@ if (!$invoiceId || !is_numeric($invoiceId)) {
 
 try {
     $authDto = AlliancePayHelper::getAuthDto($gatewayParams);
-    $callbackHandler = new CallbackHandler();
 
-    $callback = $callbackHandler->handle($authDto, $payload);
+    $trimmedBody = trim($bodyRaw);
+    $isToken = $trimmedBody !== '' && !str_contains($trimmedBody, ' ');
+    $dotCount = substr_count($trimmedBody, '.');
+
+    if ($isToken && $dotCount === 2) {
+        $jwsHeader = JwsVerificationService::deserialiseHeader($trimmedBody);
+        $httpClient = HttpClientFactory::create();
+        $bankJwk = BankPublicKeyProvider::fetch($httpClient, $authDto->getBaseUrl(), $jwsHeader['kid']);
+        $verifiedPayload = JwsVerificationService::verify($trimmedBody, $bankJwk, $jwsHeader['alg']);
+    } else {
+        $verifiedPayload = json_decode($trimmedBody, true);
+    }
+
+    if (!is_array($verifiedPayload) || empty($verifiedPayload)) {
+        throw new CallbackException('Empty or invalid callback payload.');
+    }
+
+    if (empty($verifiedPayload['operation'])) {
+        http_response_code(200);
+        echo 'OK';
+        exit;
+    }
+
+    $callbackHandler = new CallbackHandler();
+    $callback = $callbackHandler->handle($authDto, $verifiedPayload);
 
     $callbackData = $callback->toArray();
+    foreach (['createDate', 'expiredOrderDate'] as $dateField) {
+        if ($callbackData[$dateField] instanceof DateTimeImmutable) {
+            $callbackData[$dateField] = $callbackData[$dateField]->format('Y-m-d H:i:s');
+        }
+    }
+
     $orderStatus = $callbackData['orderStatus'];
     $operationArray = $callbackData['operation'];
     $operationStatus = $operationArray['status'] ?? '';
@@ -59,13 +86,13 @@ try {
         if ($operationType === AlliancePayHelper::OPERATION_TYPE_REFUND) {
             logTransaction(
                 $gatewayParams['name'],
-                $payload,
+                $callbackData,
                 "Refund Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
         } elseif ($operationType === AlliancePayHelper::OPERATION_TYPE_PREAUTH) {
             logTransaction(
                 $gatewayParams['name'],
-                $payload,
+                $callbackData,
                 "PREAUTH Authorized. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
         } elseif ($operationType === AlliancePayHelper::OPERATION_TYPE_COMPLETION) {
@@ -96,7 +123,7 @@ try {
 
             logTransaction(
                 $gatewayParams['name'],
-                $payload,
+                $callbackData,
                 "Completion Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
         } else {
@@ -125,20 +152,20 @@ try {
 
             logTransaction(
                 $gatewayParams['name'],
-                $payload,
+                $callbackData,
                 "Payment Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
         }
     } else {
         logTransaction(
             $gatewayParams['name'],
-            $payload,
+            $callbackData,
             "Payment Status: {$orderStatus}. HPP Order: {$hppOrderId}"
         );
     }
 
     AlliancePayHelper::saveCallbackHistory(
-        payload: $payload,
+        payload: $callbackData,
         operation: $operationArray,
         invoiceId: (int)$invoiceId,
         gatewayModuleName: $gatewayModuleName,
@@ -164,7 +191,7 @@ try {
             ? (int)$operationArray['transactionType']
             : null,
         ecomOrderId: $callbackData['ecomOrderId'] ?? null,
-        callbackData: $payload,
+        callbackData: $callbackData,
         originalAuthorizedAmount: (
             $operationType === AlliancePayHelper::OPERATION_TYPE_PREAUTH
             && $operationStatus === AlliancePayHelper::STATUS_SUCCESS
@@ -180,7 +207,7 @@ try {
     echo 'OK';
 
 } catch (Exception $e) {
-    logModuleCall($gatewayModuleName, 'Callback Error', $bodyJson, $e->getMessage());
+    logModuleCall($gatewayModuleName, 'Callback Error', $bodyRaw, $e->getMessage());
     http_response_code(400);
     echo 'Error';
 }

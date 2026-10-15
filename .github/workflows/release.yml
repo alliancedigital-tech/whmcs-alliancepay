@@ -4,51 +4,102 @@ on:
   push:
     tags:
       - 'v*'
+
 permissions:
   contents: write
+
+env:
+  MODULE_NAME: alliancepay
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.0'
-          extensions: mbstring, xml, json
+          extensions: mbstring, xml, json, gmp, sodium, openssl
           tools: composer
 
       - name: Install dependencies
-        run: |
-          cd modules/gateways/alliancepay
-          composer install --no-dev --optimize-autoloader
+        working-directory: modules/gateways/alliancepay
+        run: composer install --no-dev --optimize-autoloader --no-interaction
 
-      - name: Prepare Distribution
+      - name: Prepare distribution
         run: |
+          set -e
+          PACKAGE_PATHS=(
+            "modules/gateways/alliancepay.php"
+            "modules/gateways/alliancepay"
+            "modules/gateways/callback/alliancepay.php"
+            "modules/gateways/callback/alliancepay_subscription.php"
+            "modules/addons/alliancepay_subscriptions"
+            "includes/hooks/alliancepay_filter.php"
+          )
+
+          rm -rf dist
           mkdir dist
-          cp -r modules dist/
-          # Видаляємо непотрібні файли з дистрибутиву, якщо вони є в папках модулів
+          for path in "${PACKAGE_PATHS[@]}"; do
+            if [ ! -e "${path}" ]; then
+              echo "Помилка: ${path} не знайдено!"
+              exit 1
+            fi
+            mkdir -p "dist/$(dirname "${path}")"
+            cp -r "${path}" "dist/$(dirname "${path}")/"
+          done
+
+          # Видаляємо зайві файли з дистрибутиву
           find dist -name ".git*" -exec rm -rf {} +
+          find dist -name ".idea" -exec rm -rf {} +
+          find dist -name ".vscode" -exec rm -rf {} +
+          find dist -name ".DS_Store" -delete
           find dist -name "composer.json" -delete
           find dist -name "composer.lock" -delete
+          find dist -name "auth.json" -delete
+
+      - name: Verify package contents
+        run: |
+          set -e
+          REQUIRED_FILES=(
+            "modules/gateways/alliancepay.php"
+            "modules/gateways/alliancepay/AlliancePayHelper.php"
+            "modules/gateways/alliancepay/Subscription/autoload.php"
+            "modules/gateways/alliancepay/vendor/autoload.php"
+            "modules/gateways/callback/alliancepay.php"
+            "modules/gateways/callback/alliancepay_subscription.php"
+            "modules/addons/alliancepay_subscriptions/alliancepay_subscriptions.php"
+            "modules/addons/alliancepay_subscriptions/hooks.php"
+            "includes/hooks/alliancepay_filter.php"
+          )
+          for file in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "dist/${file}" ]; then
+              echo "Помилка: у пакеті відсутній обов'язковий файл ${file}"
+              exit 1
+            fi
+          done
+          if [ -n "$(find dist -name 'auth.json')" ]; then
+            echo "Помилка: у пакеті знайдено auth.json"
+            exit 1
+          fi
 
       - name: Create ZIP
         run: |
           cd dist
-          zip -r ../alliancepay-whmcs-gateway-${{ github.ref_name }}.zip .
+          zip -r "../${MODULE_NAME}-whmcs-gateway-${{ github.ref_name }}.zip" .
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: alliancepay-whmcs-gateway-${{ github.ref_name }}.zip
+          files: ${{ env.MODULE_NAME }}-whmcs-gateway-${{ github.ref_name }}.zip
           name: Release ${{ github.ref_name }}
           body: |
             - Автоматична збірка версії: ${{ github.ref_name }}
             - Включено всі залежності (vendor)
-            
+
             **Інструкція з встановлення:**
             Розпакуйте вміст архіву в кореневу директорію вашого WHMCS.
           draft: false

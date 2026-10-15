@@ -8,10 +8,10 @@ declare(strict_types=1);
 namespace AlliancePay;
 
 use AlliancePay\Sdk\Exceptions\AuthenticationException;
-use AlliancePay\Sdk\Services\Authorization\AuthorizationService;
 use AlliancePay\Sdk\Services\Authorization\Dto\AuthorizationDTO;
 use DateTimeImmutable;
 use Exception;
+use League\ISO3166\ISO3166;
 use WHMCS\Database\Capsule;
 
 /**
@@ -19,13 +19,9 @@ use WHMCS\Database\Capsule;
  */
 class AlliancePayHelper
 {
-    public const CACHE_KEY_PREFIX = 'alliancepay_auth_cache_';
-
     public const GATEWAY_MODULE_NAME = 'alliancepay';
 
     public const CALLBACK_DESCRIPTION = 'AlliancePay callback';
-
-    public const MAX_AUTH_RETRY_ATTEMPTS = 2;
 
     public const OPERATION_TYPE_PURCHASE = 'PURCHASE';
 
@@ -70,6 +66,42 @@ class AlliancePayHelper
     public const A2A_FORBIDDEN_TRANSACTION_TYPE = 102;
 
     /**
+     * @param array $clientDetails $params['clientdetails']
+     * @return array
+     */
+    public static function buildCustomerData(array $clientDetails): array
+    {
+        $phone = '';
+        $phoneCc = $clientDetails['phonecc'] ?? '';
+        $phoneNumber = $clientDetails['phonenumber'] ?? '';
+        if ($phoneCc && $phoneNumber) {
+            $phone = $phoneCc . $phoneNumber;
+        }
+
+        $customerData = [
+            'senderCustomerId' => (string)($clientDetails['userid'] ?? ''),
+            'senderFirstName' => $clientDetails['firstname'] ?? '',
+            'senderLastName' => $clientDetails['lastname'] ?? '',
+            'senderEmail' => $clientDetails['email'] ?? '',
+            'senderRegion' => $clientDetails['state'] ?? '',
+            'senderCity' => $clientDetails['city'] ?? '',
+            'senderStreet' => $clientDetails['address1'] ?? '',
+            'senderAdditionalAddress' => $clientDetails['address2'] ?? '',
+            'senderZipCode' => $clientDetails['postcode'] ?? '',
+            'senderPhone' => $phone,
+        ];
+
+        if (!empty($clientDetails['countrycode'])) {
+            $countryData = (new ISO3166())->alpha2($clientDetails['countrycode']);
+            if (!empty($countryData['numeric'])) {
+                $customerData['senderCountry'] = $countryData['numeric'];
+            }
+        }
+
+        return $customerData;
+    }
+
+    /**
      * @param array $gatewayParams
      * @return AuthorizationDTO
      * @throws AuthenticationException
@@ -81,119 +113,13 @@ class AlliancePayHelper
             throw new \InvalidArgumentException("Merchant ID is missing in gateway configuration.");
         }
 
-        $config = [
+        return AuthorizationDTO::fromArray([
             AuthorizationDTO::AUTH_PROPERTY_BASE_URL => rtrim($gatewayParams['baseUrl'] ?? '', '/'),
             AuthorizationDTO::AUTH_PROPERTY_MERCHANT_ID => $merchantId,
-            AuthorizationDTO::AUTH_PROPERTY_SERVICE_CODE => $gatewayParams['serviceCode'] ?? '',
-            AuthorizationDTO::AUTH_PROPERTY_AUTHENTICATION_KEY => $gatewayParams['authenticationKey'] ?? ''
-        ];
-
-        $cachedSettings = self::getCachedSettings($merchantId);
-        if (!empty($cachedSettings)) {
-            $config = array_merge($cachedSettings, $config);
-        }
-
-        $authService = new AuthorizationService();
-        $authDto = $authService->initAuthorization($config);
-
-        self::saveAuthorizationData($authDto, self::getCacheKey($merchantId));
-
-        return $authDto;
-    }
-
-    /**
-     * @param array $gatewayParams
-     * @return AuthorizationDTO
-     * @throws AuthenticationException
-     */
-    public static function forceReauthorize(array $gatewayParams): AuthorizationDTO
-    {
-        $merchantId = $gatewayParams['merchantId'] ?? '';
-        $cacheKey = self::getCacheKey($merchantId);
-
-        Capsule::table('tblconfiguration')->where('setting', $cacheKey)->delete();
-
-        $config = [
-            AuthorizationDTO::AUTH_PROPERTY_BASE_URL => rtrim($gatewayParams['baseUrl'] ?? '', '/'),
-            AuthorizationDTO::AUTH_PROPERTY_MERCHANT_ID => $merchantId,
-            AuthorizationDTO::AUTH_PROPERTY_SERVICE_CODE => $gatewayParams['serviceCode'] ?? '',
-            AuthorizationDTO::AUTH_PROPERTY_AUTHENTICATION_KEY => $gatewayParams['authenticationKey'] ?? ''
-        ];
-
-        $authService = new AuthorizationService();
-        $authDto = $authService->initAuthorization($config);
-
-        self::saveAuthorizationData($authDto, $cacheKey);
-
-        return $authDto;
-    }
-
-    /**
-     * @param string $merchantId
-     * @return string
-     */
-    public static function getCacheKey(string $merchantId): string
-    {
-        return self::CACHE_KEY_PREFIX . md5($merchantId);
-    }
-
-    /**
-     * @param string $merchantId
-     * @return array
-     */
-    public static function getCachedSettings(string $merchantId): array
-    {
-        $cacheKey = self::getCacheKey($merchantId);
-        $value = Capsule::table('tblconfiguration')->where('setting', $cacheKey)->value('value');
-
-        return !empty($value) ? json_decode($value, true) : [];
-    }
-
-    /**
-     * @param string $merchantId
-     * @return string
-     */
-    public static function getAuthorizationDataHtml(string $merchantId): string
-    {
-        $html = '<div style="margin-top: 5px; padding: 15px; background: #f8f9fa;'
-            . ' border: 1px solid #ddd; border-radius: 4px; max-width: 600px;">';
-
-        if (empty($merchantId)) {
-            $html .= '<span style="color: #f0ad4e; font-weight: bold;">'
-                . 'Вкажіть Merchant ID та збережіть налаштування для перевірки сесії.</span>';
-        } else {
-            $cached = self::getCachedSettings($merchantId);
-
-            if (empty($cached)) {
-                $html .= '<span style="color: #d9534f; font-weight: bold;">'
-                    . 'Кеш порожній. Токени будуть згенеровані автоматично під час першого платежу.</span>';
-            } else {
-                $serverPublic = $cached['serverPublic'] ?? '';
-                if (is_array($serverPublic)) {
-                    $serverPublic = json_encode($serverPublic);
-                }
-
-                $html .= '<strong>Expiration:</strong> '
-                    . htmlspecialchars($cached['tokenExpirationDateTime'] ?? 'N/A') . '<br>';
-                $html .= '<strong>Device ID:</strong> '
-                    . htmlspecialchars($cached['deviceId'] ?? 'N/A') . '<br>';
-                $html .= '<strong>Auth Token:</strong> '
-                    . htmlspecialchars(self::maskToken($cached['authToken'] ?? '')) . '<br>';
-                $html .= '<strong>Refresh Token:</strong> '
-                    . htmlspecialchars(self::maskToken($cached['refreshToken'] ?? '')) . '<br>';
-                $html .= '<strong>Server Public (JSON):</strong><br>';
-                $html .= '<textarea readonly style="width: 100%; height: 70px; margin-top: 5px;'
-                    . ' font-family: monospace; font-size: 11px; background: #e9ecef;">'
-                    . htmlspecialchars($serverPublic) . '</textarea>';
-            }
-        }
-
-        $html .= '</div>';
-        $html .= '<script>jQuery(document).ready(function($) { '
-            . '$("textarea[name=\'field[alliancepay][authenticationKey]\']").css('
-            . '{"-webkit-text-security": "disc", "font-family": "monospace"}); });</script>';
-
-        return $html;
+            AuthorizationDTO::AUTH_PROPERTY_JWS_PRIVATE_KEY => $gatewayParams['jwsPrivateKey'] ?? '',
+            AuthorizationDTO::AUTH_PROPERTY_JWS_KEY_ID => $gatewayParams['jwsKeyId'] ?? '',
+            AuthorizationDTO::AUTH_PROPERTY_AUTHENTICATION_KEY => $gatewayParams['authenticationKey'] ?? '',
+        ]);
     }
 
     /**
@@ -410,19 +336,6 @@ class AlliancePayHelper
     }
 
     /**
-     * @param string $token
-     * @return string
-     */
-    private static function maskToken(string $token): string
-    {
-        if (strlen($token) <= 8) {
-            return str_repeat('*', strlen($token));
-        }
-
-        return substr($token, 0, 8) . '...' . substr($token, -4);
-    }
-
-    /**
      * @return void
      */
     public static function ensureTablesExist(): void
@@ -511,21 +424,6 @@ class AlliancePayHelper
         Capsule::table('tblconfiguration')->updateOrInsert(
             ['setting' => 'alliancepay_tables_created'],
             ['value' => '1']
-        );
-    }
-
-    /**
-     * @param AuthorizationDTO $authData
-     * @param string $cacheKey
-     * @return void
-     */
-    public static function saveAuthorizationData(AuthorizationDTO $authData, string $cacheKey): void
-    {
-        $jsonToSave = json_encode($authData->toArray());
-
-        Capsule::table('tblconfiguration')->updateOrInsert(
-            ['setting' => $cacheKey],
-            ['value' => $jsonToSave]
         );
     }
 

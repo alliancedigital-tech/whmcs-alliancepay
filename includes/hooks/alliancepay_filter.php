@@ -11,6 +11,28 @@ if (!defined("WHMCS")) {
     die("This file cannot be accessed directly");
 }
 
+require_once __DIR__ . '/../../modules/gateways/alliancepay/Subscription/autoload.php';
+
+function alliancepay_filter_subscribable(callable $check): bool
+{
+    try {
+        return $check();
+    } catch (\Throwable $e) {
+        logActivity('AlliancePay filter: subscription check failed: ' . $e->getMessage());
+        alliancepay_filter_log('Hook exception', [], get_class($e) . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+
+        return false;
+    }
+}
+
+function alliancepay_filter_log(string $action, array $request, string $response): void
+{
+    try {
+        logModuleCall('alliancepay', 'Filter hook: ' . $action, $request, $response);
+    } catch (\Throwable $e) {
+    }
+}
+
 add_hook('ClientAreaPageCart', 1, function ($vars) {
     $hasRecurring = false;
     if (isset($_SESSION['cart']['products'])) {
@@ -35,7 +57,38 @@ add_hook('ClientAreaPageCart', 1, function ($vars) {
         }
     }
 
+    $cartSnapshot = [
+        'filename' => $vars['filename'] ?? null,
+        'a' => $_GET['a'] ?? null,
+        'hasRecurring' => $hasRecurring,
+        'gateways_before' => isset($vars['gateways']) ? array_keys((array)$vars['gateways']) : null,
+        'products' => array_map(
+            static fn ($p) => ['pid' => $p['pid'] ?? null, 'billingcycle' => $p['billingcycle'] ?? null, 'qty' => $p['qty'] ?? null],
+            (array)($_SESSION['cart']['products'] ?? [])
+        ),
+        'domains' => count((array)($_SESSION['cart']['domains'] ?? [])),
+        'addons' => count((array)($_SESSION['cart']['addons'] ?? [])),
+    ];
+
+    $subscribable = false;
     if ($hasRecurring) {
+        try {
+            [$subscribable, $why] = \AlliancePay\Subscription\SubscriptionService::explainCart($_SESSION['cart'] ?? []);
+        } catch (\Throwable $e) {
+            $subscribable = false;
+            $why = 'EXCEPTION ' . get_class($e) . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine();
+            logActivity('AlliancePay filter: subscription check failed: ' . $e->getMessage());
+        }
+        alliancepay_filter_log(
+            'cart ' . ($subscribable ? 'KEEP alliancepay' : 'HIDE alliancepay'),
+            $cartSnapshot,
+            (string)$why
+        );
+    } else {
+        alliancepay_filter_log('cart one-time only, nothing to filter', $cartSnapshot, 'hasRecurring=false');
+    }
+
+    if ($hasRecurring && !$subscribable) {
         $gateways = $vars['gateways'];
         if (isset($gateways['alliancepay'])) {
             unset($gateways['alliancepay']);
@@ -145,6 +198,18 @@ add_hook('ClientAreaPageViewInvoice', 1, function ($vars) {
         })->exists();
 
     if (!$hasRecurringItems) {
+        return [];
+    }
+
+    $invoiceSubscribable = alliancepay_filter_subscribable(
+        static fn () => \AlliancePay\Subscription\SubscriptionService::isInvoiceSubscribable($invoiceId)
+    );
+    alliancepay_filter_log(
+        'invoice ' . ($invoiceSubscribable ? 'KEEP alliancepay' : 'HIDE alliancepay'),
+        ['invoiceid' => $invoiceId, 'availableGateways' => array_keys((array)($vars['availableGateways'] ?? []))],
+        $invoiceSubscribable ? 'invoice is subscribable' : 'invoice has recurring items and is not subscribable'
+    );
+    if ($invoiceSubscribable) {
         return [];
     }
 
