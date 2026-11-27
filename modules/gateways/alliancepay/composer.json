@@ -15,7 +15,7 @@
         "ext-hash": "*",
         "ext-openssl": "*",
         "ext-sodium": "*",
-        "alliance/alliancepay-payment-sdk": "^1.5.0",
+        "alliance/alliancepay-payment-sdk": "^1.6.0",
         "league/iso3166": "4.3.3"
     },
     "config": {

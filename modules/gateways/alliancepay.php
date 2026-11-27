@@ -12,6 +12,7 @@ if (!defined("WHMCS")) {
 require_once __DIR__ . '/alliancepay/vendor/autoload.php';
 require_once __DIR__ . '/alliancepay/AlliancePayHelper.php';
 require_once __DIR__ . '/alliancepay/Subscription/autoload.php';
+require_once __DIR__ . '/alliancepay/Fiscalization/autoload.php';
 
 use AlliancePay\Sdk\Payment\Dto\Order\OrderRequestDTO;
 use AlliancePay\Sdk\Payment\Order\CreateOrder;
@@ -24,6 +25,10 @@ use AlliancePay\Sdk\Services\DateTime\DateTimeImmutableProvider;
 use AlliancePay\AlliancePayHelper;
 use AlliancePay\Sdk\Exceptions\AuthenticationException;
 use AlliancePay\Sdk\Traits\CoinAmountConverter;
+use AlliancePay\Fiscalization\AutoDispatcher;
+use AlliancePay\Fiscalization\FiscalizationRepository;
+use AlliancePay\Fiscalization\FiscalizationSchema;
+use AlliancePay\Fiscalization\FiscalizationSettings;
 use AlliancePay\Subscription\SubscriptionConstants;
 use AlliancePay\Subscription\SubscriptionService;
 use AlliancePay\Subscription\SubscriptionSchema;
@@ -42,6 +47,7 @@ function alliancepay_config($params)
 {
     AlliancePayHelper::ensureTablesExist();
     SubscriptionSchema::ensure();
+    FiscalizationSchema::ensure();
 
     $gatewaySettings = [];
     try {
@@ -120,7 +126,7 @@ function alliancepay_config($params)
             'FriendlyName' => 'JWS Private Key',
             'Type' => 'textarea',
             'Rows' => '6',
-            'Description' => 'RSA private key у форматі PEM (PKCS#8, "-----BEGIN PRIVATE KEY-----") для підпису JWS-запитів (RS256). Зберігайте в секреті.',
+            'Description' => 'Приватний ключ у форматі PEM (PKCS#8, "-----BEGIN PRIVATE KEY-----") для підпису JWS-запитів. Рекомендовано EC P-256 (алгоритм ES256); RSA (RS256) підтримується для сумісності. Алгоритм обирається за типом ключа. Зберігайте в секреті.',
         ],
         'jwsKeyId' => [
             'FriendlyName' => 'JWS Key ID',
@@ -133,6 +139,41 @@ function alliancepay_config($params)
             'Type' => 'textarea',
             'Rows' => '4',
             'Description' => 'Your Authentication Key from the bank in JSON.'
+        ],
+        FiscalizationSettings::KEY_ENABLED => [
+            'FriendlyName' => 'Фіскалізація: увімкнути',
+            'Type' => 'yesno',
+            'Description' => 'Фіскалізація успішних платежів і повернень (лише для UAH) через Alliance Kasa. Вимкнено — запити не відправляються.',
+        ],
+        FiscalizationSettings::KEY_AUTO => [
+            'FriendlyName' => 'Фіскалізація: автоматична',
+            'Type' => 'yesno',
+            'Description' => 'Автоматично фіскалізувати після успішного платежу та повернення. Вимкнено — лише вручну кнопкою на сторінці інвойсу (і для платежів, і для повернень).',
+        ],
+        FiscalizationSettings::KEY_TAX_CODE => [
+            'FriendlyName' => 'Фіскалізація: код податкової групи',
+            'Type' => 'text',
+            'Size' => '10',
+            'Description' => 'Типове значення taxCode (ціле число). Можна лишити порожнім. Значення з налаштувань продукту мають пріоритет.',
+        ],
+        FiscalizationSettings::KEY_CLASSIFICATION_CODE => [
+            'FriendlyName' => 'Фіскалізація: УКТЗЕД',
+            'Type' => 'text',
+            'Size' => '20',
+            'Description' => 'Типовий classificationCode, лише цифри. Обов\'язковий, якщо код податкової групи 2, 7 або 8.',
+        ],
+        FiscalizationSettings::KEY_EXCISE_LABELS => [
+            'FriendlyName' => 'Фіскалізація: акцизні марки',
+            'Type' => 'textarea',
+            'Rows' => '2',
+            'Description' => 'Типові exciseLabels: через кому або по одній в рядок.',
+        ],
+        FiscalizationSettings::KEY_MEASUREMENT_CODE => [
+            'FriendlyName' => 'Фіскалізація: код одиниці виміру',
+            'Type' => 'text',
+            'Size' => '10',
+            'Default' => FiscalizationSettings::DEFAULT_MEASUREMENT_CODE,
+            'Description' => 'Типовий measurementCode (за замовчуванням 0001 — штука). Обов\'язковий.',
         ],
         'JwsFieldMask' => [
             'FriendlyName' => '',
@@ -433,6 +474,17 @@ function alliancepay_refund($params)
             refundData: $result->toArray(),
             merchantRequestId: $refundMerchantId,
         );
+
+        if ($result->getStatus() === AlliancePayHelper::STATUS_SUCCESS && $result->getOperationId()) {
+            AutoDispatcher::schedule(
+                $params,
+                (int)$params['invoiceid'],
+                (string)$result->getOperationId(),
+                FiscalizationRepository::TYPE_REFUND,
+                (int)$refundCoinAmount,
+                (string)$operationId
+            );
+        }
 
         return [
             'status' => 'success',

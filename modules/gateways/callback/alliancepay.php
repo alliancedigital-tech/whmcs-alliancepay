@@ -10,8 +10,11 @@ require_once __DIR__ . '/../../../includes/gatewayfunctions.php';
 require_once __DIR__ . '/../../../includes/invoicefunctions.php';
 require_once __DIR__ . '/../alliancepay/vendor/autoload.php';
 require_once __DIR__ . '/../alliancepay/AlliancePayHelper.php';
+require_once __DIR__ . '/../alliancepay/Fiscalization/autoload.php';
 
 use AlliancePay\AlliancePayHelper;
+use AlliancePay\Fiscalization\AutoDispatcher;
+use AlliancePay\Fiscalization\FiscalizationRepository;
 use AlliancePay\Sdk\Exceptions\CallbackException;
 use AlliancePay\Sdk\Payment\Callback\CallbackHandler;
 use AlliancePay\Sdk\Services\Clients\HttpClientFactory;
@@ -89,6 +92,19 @@ try {
                 $callbackData,
                 "Refund Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
+
+            $originalOperationId = Capsule::table('alliance_integration_order_refund')
+                ->where('operation_id', $operationId)
+                ->value('original_operation_id')
+                ?: ($operationArray['originalOperationId'] ?? null);
+            AutoDispatcher::schedule(
+                $gatewayParams,
+                (int)$invoiceId,
+                (string)$operationId,
+                FiscalizationRepository::TYPE_REFUND,
+                (int)($operationArray['coinAmount'] ?? round($amountPaid * 100)),
+                $originalOperationId ? (string)$originalOperationId : null
+            );
         } elseif ($operationType === AlliancePayHelper::OPERATION_TYPE_PREAUTH) {
             logTransaction(
                 $gatewayParams['name'],
@@ -126,6 +142,14 @@ try {
                 $callbackData,
                 "Completion Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
+
+            AutoDispatcher::schedule(
+                $gatewayParams,
+                (int)$invoiceId,
+                (string)$operationId,
+                FiscalizationRepository::TYPE_PURCHASE,
+                (int)round($amountPaid * 100)
+            );
         } else {
             $invoiceId = checkCbInvoiceID($invoiceId, $gatewayParams['name']);
 
@@ -155,6 +179,16 @@ try {
                 $callbackData,
                 "Payment Successful. HPP Order: {$hppOrderId}, Operation: {$operationId}"
             );
+
+            if ($operationType === AlliancePayHelper::OPERATION_TYPE_PURCHASE) {
+                AutoDispatcher::schedule(
+                    $gatewayParams,
+                    (int)$invoiceId,
+                    (string)$operationId,
+                    FiscalizationRepository::TYPE_PURCHASE,
+                    (int)round($amountPaid * 100)
+                );
+            }
         }
     } else {
         logTransaction(

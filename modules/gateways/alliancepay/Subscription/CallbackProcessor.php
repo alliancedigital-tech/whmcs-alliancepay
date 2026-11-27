@@ -8,9 +8,13 @@ declare(strict_types=1);
 namespace AlliancePay\Subscription;
 
 use AlliancePay\AlliancePayHelper;
+use AlliancePay\Fiscalization\AutoDispatcher;
+use AlliancePay\Fiscalization\FiscalizationRepository;
 use AlliancePay\Sdk\Payment\Dto\Subscription\Callback\ScheduledPaymentDTO;
 use AlliancePay\Sdk\Payment\Dto\Subscription\Callback\SubscriptionCallbackDTO;
 use WHMCS\Database\Capsule;
+
+require_once __DIR__ . '/../Fiscalization/autoload.php';
 
 /**
  * Class CallbackProcessor.
@@ -367,6 +371,19 @@ class CallbackProcessor
         }
 
         addInvoicePayment($invoiceId, $operationId, $coins / 100, 0, $this->gatewayModule);
+
+        try {
+            $fiscalParams = getGatewayVariables($this->gatewayModule);
+            AutoDispatcher::schedule(
+                $fiscalParams,
+                (int)$invoiceId,
+                $operationId,
+                FiscalizationRepository::TYPE_PURCHASE,
+                $coins
+            );
+        } catch (\Throwable $e) {
+            logModuleCall($this->gatewayModule, 'Fiscalization: schedule error (subscription)', [], $e->getMessage());
+        }
 
         ScheduledPaymentRepository::update($row['id'], [
             'status' => SubscriptionConstants::PAYMENT_SUCCESS,
